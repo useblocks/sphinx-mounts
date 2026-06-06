@@ -1,0 +1,51 @@
+# Pharaoh project configuration.
+#
+# Pharaoh wraps a sphinx-needs project with authoring, review, and audit
+# skills. This file controls *Pharaoh's* behaviour only — need types, link
+# options, custom fields, statuses, and id_regex live in
+# ``docs/ubproject.toml`` and are not duplicated here.
+
+[pharaoh]
+# advisory  — Pharaoh suggests the recommended workflow but never blocks.
+# enforcing — Pharaoh checks prerequisites before each skill and blocks if
+#             they are not met.
+strictness = "advisory"
+
+[pharaoh.id_scheme]
+# IDs are <TYPE-PREFIX>_<DOMAIN>_<NNN>, e.g. FEAT_DIRMOUNT_001,
+# CREQ_TOMLCONF_001, ERR_COLLISION_001. The authoritative, machine-checkable
+# regex lives in .pharaoh/project/id-conventions.yaml; this pattern is the
+# descriptive hint used by pharaoh-id-allocate.
+pattern = "{PREFIX}{DOMAIN}_{NUMBER}"
+auto_increment = true
+
+[pharaoh.workflow]
+mode = "reverse-eng"
+# Reverse-engineering an existing codebase: needs are being authored from
+# code that already exists. Verification matters from day one; change-analysis
+# and the MECE release gate stay off until the catalogue stabilises. Tighten
+# via pharaoh-gate-advisor as the catalogue grows.
+require_change_analysis = false
+require_verification = true
+require_mece_on_release = false
+
+[pharaoh.traceability]
+# "source-type -> target-type": every need of source-type must carry at least
+# one outgoing link that reaches a target-type need.
+required_links = [
+  "comp_req -> feat", # every comp_req :satisfies: a feat
+  "err -> feat",      # every err reaches a feat via one of
+  #   :tested_in: / :checked_in: / :mitigated_in:
+  #   (the at-least-one-handling rule)
+  "impl -> feat", # every code-authored impl :links: the feat it implements
+  # test -> comp_req / err is intentionally NOT a hard chain: a test
+  #   :verifies: a comp_req OR :detects: an err (at-least-one), which a single
+  #   required chain cannot express. Enforced via the test review checklist.
+]
+
+[pharaoh.codelinks]
+# sphinx-codelinks is loaded by docs/conf.py and configured under the
+# [codelinks] table in docs/ubproject.toml. Two one-line-need projects:
+# ``impl`` needs in src/ (:links: a feat) and ``test`` needs in tests/
+# (:verifies: a comp_req and/or :detects: an err).
+enabled = true

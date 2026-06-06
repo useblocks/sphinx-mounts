@@ -144,6 +144,7 @@ def _attach_mount_dir(
     directory whose parent gitignores it (the canonical
     ``bazel-bin/...`` case) would silently produce zero files.
     """
+    # @ Directory walk and docname registration, IMPL_DIRMOUNT_001, [FEAT_DIRMOUNT_001]
     added: set[str] = set()
     suffixes = tuple(project.source_suffix)
 
@@ -229,6 +230,7 @@ def _build_walker(
 def _attach_mount_files(
     project: Project, mount: MountConfig, files: Iterable[Path]
 ) -> set[str]:
+    # @ File-list docname registration, IMPL_FILEMOUNT_001, [FEAT_FILEMOUNT_001]
     added: set[str] = set()
     suffixes = tuple(project.source_suffix)
 

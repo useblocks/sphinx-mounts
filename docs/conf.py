@@ -17,7 +17,25 @@ extensions = [
     "sphinx_design",
     "myst_parser",
     "sphinx.ext.intersphinx",
+    "sphinxcontrib.mermaid",
+    # sphinx_needs MUST be loaded before sphinx_codelinks: the codelinks
+    # setup hook fails fast if ``sphinx_needs`` is not already registered.
+    "sphinx_needs",
+    "sphinx_codelinks",
 ]
+
+# Sphinx-Needs configuration is declared in ubproject.toml. The TOML form
+# is consumable by ubCode and other static readers without evaluating
+# this file. See https://sphinx-needs.readthedocs.io/en/latest/configuration.html#needs-from-toml
+needs_from_toml = "ubproject.toml"
+
+# -- sphinx-codelinks: code -> need traceability ----------------------------
+# All sphinx-codelinks configuration lives under the [codelinks] table in
+# ubproject.toml, so that ubCode and other static readers consume exactly the
+# same config without evaluating this file. ubCode currently supports the
+# one-line-need form (``@ title, id, [links]``) configured this way. The only
+# thing conf.py does is point the extension at that table:
+src_trace_config_from_toml = "ubproject.toml"
 
 exclude_patterns: list[str] = []
 templates_path = ["source/_static/_templates/furo"]
