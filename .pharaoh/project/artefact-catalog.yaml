@@ -2,39 +2,35 @@
 #
 # Validates against schemas/artefact-catalog.schema.json.
 #
-# Five types:
-#   feat      capability
-#   comp_req  testable obligation, :satisfies: a feat
-#   err       failure condition, handled in a feat
-#   impl      code marker, :links: a feat
-#   test      :verifies: a comp_req and/or :detects: an err
-# impl and test are authored in code as sphinx-codelinks one-line needs (see
-# the [codelinks] tables in docs/ubproject.toml), not via RST.
+# Agile spine + ISO 26262-8 §11 tool-error layer (see
+# docs/source/specs/approach.rst):
+#   story        agile user story
+#   feat         feature, :realizes: a story
+#   err          potential tool error, :affects: a feat
+#   test         :prevents: an err (structural prevention; one-line need in tests/)
+#   check        :detects: an err (runtime/CI mitigation; RST)
+#   restriction  :avoids: an err (usage-constraint mitigation; RST)
+#   impl         :links: a feat (code trace; one-line need in src/)
 #
-# Forward traceability is enforced via `required_metadata_fields: source_doc`
-# on the RST types (need -> code). Reverse traceability (code -> feat /
-# comp_req) is carried by the impl/test one-line needs' outgoing links; the
-# *incoming* rule ("every feat has an impl", "every comp_req has a test") is
-# NOT representable here — see https://github.com/useblocks/sphinx-needs/issues/1590.
-#
-# OR-rules are left to checklists, not encoded as required_links (AND semantics):
-#  - err:  at least one of tested_in / checked_in / mitigated_in.
-#  - test: at least one of verifies / detects.
+# required_links names the outgoing relation every need of that type must
+# carry. The *incoming* OR-rule "every err has at least one treatment
+# (test/check/restriction)" is not representable here (AND semantics) — it is
+# a checklist item and an upstream gap (sphinx-needs#1590).
+
+story:
+  required_fields: [id, status, title]
+  optional_fields: [issue]
+  lifecycle: [open, in_progress, implemented]
+  required_links: []
+  optional_links: []
+  required_metadata_fields: [status]
+  required_roles: []
 
 feat:
   required_fields: [id, status, title, source_doc]
   optional_fields: [issue]
   lifecycle: [open, in_progress, implemented]
-  required_links: []
-  optional_links: []
-  required_metadata_fields: [status, source_doc]
-  required_roles: []
-
-comp_req:
-  required_fields: [id, status, title, satisfies, source_doc]
-  optional_fields: [issue]
-  lifecycle: [open, in_progress, implemented]
-  required_links: [satisfies]
+  required_links: [realizes]
   optional_links: []
   required_metadata_fields: [status, source_doc]
   required_roles: []
@@ -43,34 +39,47 @@ err:
   required_fields: [id, status, title, source_doc]
   optional_fields: [issue, severity]
   lifecycle: [open, in_progress, implemented]
-  required_links: []
-  optional_links: [tested_in, checked_in, mitigated_in]
+  required_links: [affects]
+  optional_links: []
   required_metadata_fields: [status, source_doc, severity]
   required_roles: []
 
-# impl needs are authored in src/ as sphinx-codelinks one-line needs. Every
-# impl carries a non-empty built-in `links` to the feat it implements —
-# guaranteed by the mandatory one-line `links` field and checked by the
-# "impl -> feat" chain in pharaoh.toml (kept out of required_links here, which
-# lists named extra-link relations).
+test:
+  required_fields: [id, status, title]
+  optional_fields: []
+  lifecycle: [open, in_progress, implemented]
+  required_links: [prevents]
+  optional_links: []
+  required_metadata_fields: [status]
+  required_roles: []
+
+check:
+  required_fields: [id, status, title]
+  optional_fields: []
+  lifecycle: [open, in_progress, implemented]
+  required_links: [detects]
+  optional_links: []
+  required_metadata_fields: [status]
+  required_roles: []
+
+restriction:
+  required_fields: [id, status, title]
+  optional_fields: []
+  lifecycle: [open, in_progress, implemented]
+  required_links: [avoids]
+  optional_links: []
+  required_metadata_fields: [status]
+  required_roles: []
+
+# impl needs are authored in src/ as one-line needs and carry a non-empty
+# built-in `links` to their feat — guaranteed by the mandatory one-line field
+# and checked by the "impl -> feat" chain in pharaoh.toml (kept out of
+# required_links here, which lists named extra-link relations).
 impl:
   required_fields: [id, status, title]
   optional_fields: []
   lifecycle: [open, in_progress, implemented]
   required_links: []
   optional_links: []
-  required_metadata_fields: [status]
-  required_roles: []
-
-# test needs are authored in tests/ as one-line needs (second [codelinks]
-# project). verifies (-> comp_req) and detects (-> err) are optional_links; the
-# "at least one of verifies/detects" rule is a checklist item, not a
-# required_link (which would force both).
-test:
-  required_fields: [id, status, title]
-  optional_fields: []
-  lifecycle: [open, in_progress, implemented]
-  required_links: []
-  optional_links: [verifies, detects]
   required_metadata_fields: [status]
   required_roles: []

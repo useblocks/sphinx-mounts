@@ -6,14 +6,11 @@
 # ``docs/ubproject.toml`` and are not duplicated here.
 
 [pharaoh]
-# advisory  — Pharaoh suggests the recommended workflow but never blocks.
-# enforcing — Pharaoh checks prerequisites before each skill and blocks if
-#             they are not met.
 strictness = "advisory"
 
 [pharaoh.id_scheme]
-# IDs are <TYPE-PREFIX>_<DOMAIN>_<NNN>, e.g. FEAT_DIRMOUNT_001,
-# CREQ_TOMLCONF_001, ERR_COLLISION_001. The authoritative, machine-checkable
+# IDs are <TYPE-PREFIX>_<DOMAIN>_<NNN>, e.g. STORY_MOUNT_001, FEAT_DIRMOUNT_001,
+# ERR_LONGPATH_001, REST_WINPATH_001. The authoritative, machine-checkable
 # regex lives in .pharaoh/project/id-conventions.yaml; this pattern is the
 # descriptive hint used by pharaoh-id-allocate.
 pattern = "{PREFIX}{DOMAIN}_{NUMBER}"
@@ -21,10 +18,9 @@ auto_increment = true
 
 [pharaoh.workflow]
 mode = "reverse-eng"
-# Reverse-engineering an existing codebase: needs are being authored from
-# code that already exists. Verification matters from day one; change-analysis
-# and the MECE release gate stay off until the catalogue stabilises. Tighten
-# via pharaoh-gate-advisor as the catalogue grows.
+# Reverse-engineering an existing codebase: needs are authored from code that
+# already exists. Verification matters from day one; change-analysis and the
+# MECE release gate stay off until the catalogue stabilises.
 require_change_analysis = false
 require_verification = true
 require_mece_on_release = false
@@ -33,19 +29,20 @@ require_mece_on_release = false
 # "source-type -> target-type": every need of source-type must carry at least
 # one outgoing link that reaches a target-type need.
 required_links = [
-  "comp_req -> feat", # every comp_req :satisfies: a feat
-  "err -> feat",      # every err reaches a feat via one of
-  #   :tested_in: / :checked_in: / :mitigated_in:
-  #   (the at-least-one-handling rule)
-  "impl -> feat", # every code-authored impl :links: the feat it implements
-  # test -> comp_req / err is intentionally NOT a hard chain: a test
-  #   :verifies: a comp_req OR :detects: an err (at-least-one), which a single
-  #   required chain cannot express. Enforced via the test review checklist.
+  "feat -> story",      # every feature realizes a user story
+  "err -> feat",        # every error affects a feature
+  "impl -> feat",       # every impl links the feature it implements
+  "test -> err",        # every test prevents an error
+  "check -> err",       # every check detects an error
+  "restriction -> err", # every restriction avoids an error
 ]
+# NOT a hard chain: "every err has at least one treatment (test / check /
+# restriction)". That is an *incoming* OR-rule on err, which required_links
+# (outgoing, AND semantics) cannot express — enforced via the err review
+# checklist and tracked upstream (sphinx-needs#1590).
 
 [pharaoh.codelinks]
 # sphinx-codelinks is loaded by docs/conf.py and configured under the
 # [codelinks] table in docs/ubproject.toml. Two one-line-need projects:
-# ``impl`` needs in src/ (:links: a feat) and ``test`` needs in tests/
-# (:verifies: a comp_req and/or :detects: an err).
+# impl needs in src/ (:links: a feat) and test needs in tests/ (:prevents: an err).
 enabled = true

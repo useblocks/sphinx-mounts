@@ -47,7 +47,6 @@ def _build(make_app, host_dir: Path) -> Path:
 # ---------- TOML-driven tests (primary path) ----------
 
 
-# @ Verifies directory mount discovery, TEST_DIRMOUNT_001, [CREQ_DIRMOUNT_001]
 def test_basic_mount_makes_external_files_readable(
     make_app, make_host_project, bundle_simple
 ):
@@ -650,7 +649,6 @@ def test_mount_single_file_via_files(make_app, make_host_project, bundle_simple)
     assert not (outdir / "_generated/api/index.html").exists()
 
 
-# @ Verifies file-list mounting, TEST_FILEMOUNT_001, [CREQ_FILEMOUNT_001]
 def test_mount_multiple_files_via_files(make_app, make_host_project, bundle_simple):
     """A `files = [...]` mount with multiple entries registers all of them
     flat under ``mount_at`` (basename → docname tail)."""
@@ -708,6 +706,7 @@ def test_mount_files_with_attach_to_wires_entry_doc(
     assert "_generated/api/intro.html" in index_html
 
 
+# @ Prevents unregistered file-list suffix, TEST_BADSUFFIX_001, [ERR_BADSUFFIX_001]
 def test_mount_files_unknown_suffix_raises(make_app, make_host_project, tmp_path):
     """A listed file whose extension is not in source_suffix is an error —
     the user explicitly asked for it to be mounted, so silently skipping
@@ -775,7 +774,7 @@ def test_exclude_filter_bundle_files(make_app, make_host_project, bundle_simple)
     assert not (outdir / "_generated/api-foo/details.html").exists()
 
 
-# @ Detects docname collision, TEST_COLLISION_001, [], [ERR_COLLISION_001]
+# @ Prevents docname collision, TEST_COLLISION_001, [ERR_COLLISION_001]
 def test_docname_conflict_raises(make_app, make_host_project, bundle_simple, tmp_path):
     """Two mounts producing the same docname must be rejected."""
     host = make_host_project()
@@ -913,7 +912,6 @@ def test_toml_overrides_conf_py_mounts(
     assert not (outdir / "_generated/from-py/index.html").exists()
 
 
-# @ Verifies TOML path anchoring, TEST_TOMLCONF_001, [CREQ_TOMLCONF_001]
 def test_toml_in_subdir_anchors_paths_to_toml_directory(
     make_app, make_host_project, bundle_simple
 ):
@@ -1019,7 +1017,6 @@ def test_mounts_from_toml_disabled_with_none(
 # ---------- attach_to: toctree integration ----------
 
 
-# @ Verifies toctree wiring, TEST_TOCWIRE_001, [CREQ_TOCWIRE_001]
 def test_attach_to_extends_existing_toctree(make_app, make_host_project, bundle_simple):
     """A mount with attach_to extends the host doc's existing toctree."""
     host = make_host_project()
@@ -1088,7 +1085,7 @@ def test_attach_to_targets_specific_toctree_by_index(
     )
 
 
-# @ Detects toctree_index out of range, TEST_TOCIDX_001, [], [ERR_TOCIDX_001]
+# @ Prevents toctree_index out of range, TEST_TOCIDX_001, [ERR_TOCIDX_001]
 def test_attach_to_index_out_of_range_raises(
     make_app, make_host_project, bundle_simple
 ):
@@ -1242,7 +1239,6 @@ def test_attach_to_idempotent_with_static_entry(
     assert includes.count("_generated/api-foo/index") == 1
 
 
-# @ Detects dead attach_to target, TEST_DEADATTACH_001, [], [ERR_DEADATTACH_001]
 def test_attach_to_warns_when_target_docname_missing(
     make_app, make_host_project, bundle_simple
 ):
@@ -1323,7 +1319,6 @@ def _docs_read_in_log(log: str) -> set[str]:
 # ---------- incremental rebuild ----------
 
 
-# @ Detects stale incremental mount, TEST_STALEMOUNT_001, [], [ERR_STALEMOUNT_001]
 def test_incremental_only_reads_changed_mount_file(
     make_app, make_host_project, tmp_path, bundle_simple
 ):

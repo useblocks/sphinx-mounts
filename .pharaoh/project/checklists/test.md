@@ -9,14 +9,11 @@ axes:
 
 # Test review checklist
 
-- [ ] ID matches `id_regex` (`^(FEAT|CREQ|ERR|IMPL|TEST)_[A-Z0-9_]*[0-9]{3}$`).
-- [ ] Title states what the test checks ("Verifies …" / "Detects …").
+- [ ] ID matches `id_regex` (`^(STORY|FEAT|ERR|TEST|CHECK|REST|IMPL)_[A-Z0-9_]*[0-9]{3}$`).
+- [ ] Title states what the test rules out ("Prevents …").
 - [ ] Status is one of `open`, `in_progress`, `implemented`.
-- [ ] **At least one** of `:verifies:` (→ comp_req) or `:detects:` (→ err) is
-      non-empty. (OR-rule — enforced here, not via `required_links`.)
-- [ ] `:verifies:` targets are component requirements; `:detects:` targets are
-      errors — no cross-type mistakes.
-- [ ] The one-line need sits in the test file next to the test it represents,
-      so its source location *is* the test (sphinx-codelinks local-url).
-- [ ] An error-only test writes `[]` for the mandatory `verifies` field and the
-      error id for `detects`.
+- [ ] `:prevents:` names the error(s) the test structurally rules out.
+- [ ] The one-line need sits in the test file next to the test it represents
+      (sphinx-codelinks local-url).
+- [ ] The test actually fails if the error condition is introduced — it
+      proves prevention, not just happy-path behaviour.

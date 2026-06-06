@@ -13,47 +13,39 @@
 index_on_save = true
 
 # ---------------------------------------------------------------------------
-# Sphinx-Needs configuration — lightweight, agile traceability.
+# Sphinx-Needs configuration — agile terminology, ISO 26262-8 §11 reasoning.
 #
-# The model deliberately mirrors the agile chain used by useblocks/ubconnect
-# (feature -> component requirement) rather than a heavyweight V-model, plus
-# an ``err`` type for failure conditions and an ``impl`` type that ties the
-# source code to the features it implements:
+# An agile spine (story -> feature) carries the tool's intent; an ISO 26262
+# tool-error layer hangs off each feature and records how every potential
+# tool error is prevented or mitigated. See docs/source/specs/approach.rst.
 #
-#   feat      — a user-observable capability the extension provides.
-#   comp_req  — a testable component requirement; ``:satisfies:`` a feat.
-#   err       — an error: a failure condition tied to one or more feats.
-#               (The directive is ``err`` rather than ``error`` to avoid
-#               shadowing the built-in docutils ``.. error::`` admonition.)
-#               Each error declares how it is addressed via one (or more)
-#               of three link relations:
-#                 :tested_in:    guarded by a test in the feature's suite
-#                 :checked_in:   guarded by a runtime check in the feature
-#                 :mitigated_in: tolerated by design (e.g. a warning + skip)
-#   impl      — an implementation marker authored as a sphinx-codelinks
-#               one-line need INSIDE the source (``@ title, IMPL_id,
-#               [FEAT_id]``); created at build time from the [codelinks]
-#               config below and ``:links:`` the feature it implements.
-#               Not hand-written in RST.
-#   test      — a test, authored the same way INSIDE the test suite
-#               (``@ title, TEST_id, [comp_req], [err]``); ``:verifies:`` the
-#               component requirement(s) it covers and/or ``:detects:`` the
-#               error(s) it checks for (ISO 26262-8 fault detection).
+#   story        — agile user story (the demand).
+#   feat         — a feature; ``:realizes:`` a story.
+#   err          — a potential *tool error* of a feature; ``:affects:`` a feat.
+#   test         — a test case that ``:prevents:`` an err: it proves the error
+#                  cannot occur structurally. Authored as a one-line
+#                  sphinx-codelinks need in tests/.
+#   check        — a runtime / CI check that ``:detects:`` an err (e.g. greps
+#                  the build log via another tool to confirm it did not occur).
+#   restriction  — a usage restriction that ``:avoids:`` an err (e.g. "enable
+#                  long-path support, or do not run on Windows").
+#   impl         — implementation marker; ``:links:`` the feat it implements.
+#                  Authored as a one-line sphinx-codelinks need in src/.
+#
+# An error is *treated* by EITHER a test (prevention — error cannot occur) OR
+# a mitigation for errors that can occur: a check (runtime detection) or a
+# restriction (usage constraint). test / check / restriction are the ISO
+# 26262-8 §11 error prevention/detection measures behind the tool-confidence
+# argument.
 #
 # Lifecycle is ``open -> in_progress -> implemented`` (see
 # ``.pharaoh/project/workflows.yaml``). There is no terminal "closed": an
-# implemented need is done, and a need that no longer applies is deleted
-# from the repository rather than retired in place.
+# implemented need is done; a need that no longer applies is deleted.
 #
-# Traceability is a loop of *outgoing* links (all schema-validatable):
-# test -> comp_req (:verifies:) and test -> err (:detects:); comp_req -> feat
-# (:satisfies:); impl -> feat (:links:); err -> feat (handling). What is NOT
-# yet expressible is the *incoming* rule "every feat must have at least one
-# impl linking to it" — sphinx-needs schema validation cannot constrain
-# incoming links / backlinks yet
-# (https://github.com/useblocks/sphinx-needs/issues/1590). The ``source_doc``
-# field additionally records need -> code paths. See
-# docs/source/specs/traceability.rst.
+# Every link is *outgoing* (schema-validatable). The *incoming* rules
+# ("every feat has an impl", "every err has a treatment") are not yet
+# expressible in sphinx-needs schema validation —
+# https://github.com/useblocks/sphinx-needs/issues/1590.
 # ---------------------------------------------------------------------------
 [needs]
 build_json = true
@@ -64,9 +56,9 @@ id_required = true
 
 # Allowed ID shape: one of the declared type prefixes, a SCREAMING_SNAKE
 # domain token, and a 3-digit ordinal — e.g. ``FEAT_DIRMOUNT_001``,
-# ``ERR_COLLISION_001``, ``TEST_TOCIDX_001``. Kept in sync with
+# ``ERR_LONGPATH_001``, ``REST_WINPATH_001``. Kept in sync with
 # ``.pharaoh/project/id-conventions.yaml``.
-id_regex = "(FEAT|CREQ|ERR|IMPL|TEST)_[A-Z0-9_]*[0-9]{3}"
+id_regex = "(STORY|FEAT|ERR|TEST|CHECK|REST|IMPL)_[A-Z0-9_]*[0-9]{3}"
 
 # Allowed lifecycle states, enforced via the built-in ``status`` field's
 # schema enum. (The older ``[[needs.statuses]]`` table is deprecated in
@@ -78,7 +70,7 @@ schema = { type = "string", enum = ["open", "in_progress", "implemented"] }
 
 # --- Custom fields (sphinx-needs 8.x [needs.fields.<name>] shape) ---------
 [needs.fields.source_doc]
-description = "Path(s) under the repo root of the source file(s) that realise this need (comma-separated). Forward need -> code trace."
+description = "Path(s) under the repo root of the source file(s) relevant to this need (comma-separated). Forward need -> code trace."
 schema = { type = "string" }
 nullable = true
 default = ""
@@ -96,49 +88,44 @@ nullable = true
 default = ""
 
 # --- Link types (sphinx-needs 8.x [needs.links.<name>] shape) -------------
-[needs.links.satisfies]
-description = "comp_req -> feat: the requirement satisfies (decomposes) the feature."
-incoming = "is satisfied by"
-outgoing = "satisfies"
+[needs.links.realizes]
+description = "feat -> story: the feature realizes (delivers) the user story."
+incoming = "realized by"
+outgoing = "realizes"
 
-[needs.links.tested_in]
-description = "error -> feat: the error is guarded by a test in the feature's test suite."
-incoming = "tested errors"
-outgoing = "tested in"
+[needs.links.affects]
+description = "err -> feat: the error is a potential failure of the feature."
+incoming = "can fail with"
+outgoing = "affects"
 
-[needs.links.checked_in]
-description = "error -> feat: the error is guarded by a runtime check inside the feature."
-incoming = "runtime-checked errors"
-outgoing = "checked in"
-
-[needs.links.mitigated_in]
-description = "error -> feat: the error is tolerated by design in the feature (graceful degradation)."
-incoming = "mitigated errors"
-outgoing = "mitigated in"
-
-[needs.links.verifies]
-description = "test -> comp_req: the test verifies (exercises) the requirement."
-incoming = "verified by"
-outgoing = "verifies"
+[needs.links.prevents]
+description = "test -> err: the test proves the error cannot occur structurally (prevention)."
+incoming = "prevented by"
+outgoing = "prevents"
 
 [needs.links.detects]
-description = "test -> err: the test checks for / detects the error condition (ISO 26262-8 fault detection)."
+description = "check -> err: a runtime / CI check detects whether the error occurred (mitigation)."
 incoming = "detected by"
 outgoing = "detects"
 
+[needs.links.avoids]
+description = "restriction -> err: the restriction constrains usage so the error cannot arise (mitigation)."
+incoming = "avoided by"
+outgoing = "avoids"
+
 # --- Need types ------------------------------------------------------------
+[[needs.types]]
+directive = "story"
+title = "Story"
+prefix = "STORY_"
+color = "#E8DAEF"
+style = "node"
+
 [[needs.types]]
 directive = "feat"
 title = "Feature"
 prefix = "FEAT_"
 color = "#BFD8D2"
-style = "node"
-
-[[needs.types]]
-directive = "comp_req"
-title = "Component Requirement"
-prefix = "CREQ_"
-color = "#FEDCD2"
 style = "node"
 
 [[needs.types]]
@@ -148,8 +135,22 @@ prefix = "ERR_"
 color = "#F5B7B1"
 style = "node"
 
+[[needs.types]]
+directive = "check"
+title = "Check"
+prefix = "CHECK_"
+color = "#A9DFBF"
+style = "node"
+
+[[needs.types]]
+directive = "restriction"
+title = "Restriction"
+prefix = "REST_"
+color = "#FAD7A0"
+style = "node"
+
 # Authored in source code as sphinx-codelinks one-line needs (see [codelinks]
-# below), not via an RST directive — but still a first-class need type.
+# below), not via an RST directive — but still first-class need types.
 [[needs.types]]
 directive = "impl"
 title = "Implementation"
@@ -157,8 +158,6 @@ prefix = "IMPL_"
 color = "#DF744A"
 style = "node"
 
-# Authored in the test suite as sphinx-codelinks one-line needs (second
-# [codelinks] project below), not via an RST directive.
 [[needs.types]]
 directive = "test"
 title = "Test"
@@ -170,16 +169,16 @@ style = "node"
 # sphinx-codelinks configuration.
 #
 # Read by sphinx-codelinks AND ubCode because ``conf.py`` sets
-# ``src_trace_config_from_toml = "ubproject.toml"``. ubCode currently supports
-# the one-line-need form configured this way. Two projects are scanned:
+# ``src_trace_config_from_toml = "ubproject.toml"``. ubCode supports the
+# one-line-need form configured this way. Two projects are scanned:
 #
 #   sphinx_mounts        — src/, one-line ``impl`` needs:
 #                            # @ <title>, <IMPL_id>, [<feat-id>, ...]
 #                          each ``:links:`` the feature(s) it implements.
 #   sphinx_mounts_tests  — tests/, one-line ``test`` needs:
-#                            # @ <title>, <TEST_id>, [<comp_req>], [<err>]
-#                          each ``:verifies:`` requirement(s) and/or
-#                          ``:detects:`` error(s).
+#                            # @ <title>, <TEST_id>, [<err-id>, ...]
+#                          each ``:prevents:`` the error(s) it structurally
+#                          rules out.
 #
 # In both, ``type`` and ``status`` come from field defaults, so they are never
 # written in the comment — the author writes only the title, id, and links.
@@ -212,8 +211,8 @@ needs_fields = [
   { name = "status", default = "implemented" },
 ]
 
-# Second project: the test suite. Same one-line mechanism, different need type
-# and link fields.
+# Second project: the test suite. Same one-line mechanism; a test ``prevents``
+# the error(s) it structurally rules out.
 [codelinks.projects.sphinx_mounts_tests.source_discover]
 src_dir = "../tests"    # relative to confdir (the docs/ directory)
 comment_type = "python"
@@ -223,16 +222,11 @@ gitignore = true
 get_oneline_needs = true
 get_need_id_refs = false
 
-# Two list fields: ``verifies`` (-> comp_req) is mandatory — write ``[]`` when
-# a test only detects an error; ``detects`` (-> err) is optional. ``type`` and
-# ``status`` trail with defaults so they are never written in the comment.
 [codelinks.projects.sphinx_mounts_tests.analyse.oneline_comment_style]
 needs_fields = [
   { name = "title" },
   { name = "id" },
-  { name = "verifies", type = "list[str]" },
-  { name = "detects", type = "list[str]", default = [
-  ] },
+  { name = "prevents", type = "list[str]" },
   { name = "type", default = "test" },
   { name = "status", default = "implemented" },
 ]
