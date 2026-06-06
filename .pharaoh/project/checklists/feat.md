@@ -16,6 +16,7 @@ axes:
 - [ ] `:source_doc:` names the implementing source file(s) (forward trace).
 - [ ] At least one code-authored `impl` need `:links:` this feature
       (reverse trace — advisory; see traceability.rst and SN #1590).
+- [ ] At least one `test` `:verifies:` this feature.
 - [ ] The errors this feature can exhibit are captured as `err` needs that
       `:affects:` it, each with a treatment.
 - [ ] No semantic overlap with another feature.

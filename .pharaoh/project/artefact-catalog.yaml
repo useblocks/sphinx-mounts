@@ -48,8 +48,8 @@ test:
   required_fields: [id, status, title]
   optional_fields: []
   lifecycle: [open, in_progress, implemented]
-  required_links: [prevents]
-  optional_links: []
+  required_links: [verifies]
+  optional_links: [prevents]
   required_metadata_fields: [status]
   required_roles: []
 

@@ -32,7 +32,7 @@ required_links = [
   "feat -> story",      # every feature realizes a user story
   "err -> feat",        # every error affects a feature
   "impl -> feat",       # every impl links the feature it implements
-  "test -> err",        # every test prevents an error
+  "test -> feat",       # every test verifies the feature it exercises
   "check -> err",       # every check detects an error
   "restriction -> err", # every restriction avoids an error
 ]

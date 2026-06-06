@@ -22,8 +22,9 @@ index_on_save = true
 #   story        — agile user story (the demand).
 #   feat         — a feature; ``:realizes:`` a story.
 #   err          — a potential *tool error* of a feature; ``:affects:`` a feat.
-#   test         — a test case that ``:prevents:`` an err: it proves the error
-#                  cannot occur structurally. Authored as a one-line
+#   test         — a test case that ``:verifies:`` a feat (it exercises the
+#                  feature) and may also ``:prevents:`` an err (proving the
+#                  error cannot occur structurally). Authored as a one-line
 #                  sphinx-codelinks need in tests/.
 #   check        — a runtime / CI check that ``:detects:`` an err (e.g. greps
 #                  the build log via another tool to confirm it did not occur).
@@ -98,8 +99,13 @@ description = "err -> feat: the error is a potential failure of the feature."
 incoming = "can fail with"
 outgoing = "affects"
 
+[needs.links.verifies]
+description = "test -> feat: the test exercises and verifies the feature."
+incoming = "verified by"
+outgoing = "verifies"
+
 [needs.links.prevents]
-description = "test -> err: the test proves the error cannot occur structurally (prevention)."
+description = "test -> err: the test also proves an error cannot occur structurally (prevention)."
 incoming = "prevented by"
 outgoing = "prevents"
 
@@ -176,9 +182,9 @@ style = "node"
 #                            # @ <title>, <IMPL_id>, [<feat-id>, ...]
 #                          each ``:links:`` the feature(s) it implements.
 #   sphinx_mounts_tests  — tests/, one-line ``test`` needs:
-#                            # @ <title>, <TEST_id>, [<err-id>, ...]
-#                          each ``:prevents:`` the error(s) it structurally
-#                          rules out.
+#                            # @ <title>, <TEST_id>, [<feat-id>], [<err-id>]
+#                          each ``:verifies:`` the feature it exercises and
+#                          may also ``:prevents:`` an error.
 #
 # In both, ``type`` and ``status`` come from field defaults, so they are never
 # written in the comment — the author writes only the title, id, and links.
@@ -211,8 +217,9 @@ needs_fields = [
   { name = "status", default = "implemented" },
 ]
 
-# Second project: the test suite. Same one-line mechanism; a test ``prevents``
-# the error(s) it structurally rules out.
+# Second project: the test suite. A test ``verifies`` the feature it exercises
+# (mandatory) and may also ``prevents`` the error(s) it structurally rules out
+# (optional — write just the feature when there is no error to prevent).
 [codelinks.projects.sphinx_mounts_tests.source_discover]
 src_dir = "../tests"    # relative to confdir (the docs/ directory)
 comment_type = "python"
@@ -226,7 +233,9 @@ get_need_id_refs = false
 needs_fields = [
   { name = "title" },
   { name = "id" },
-  { name = "prevents", type = "list[str]" },
+  { name = "verifies", type = "list[str]" },
+  { name = "prevents", type = "list[str]", default = [
+  ] },
   { name = "type", default = "test" },
   { name = "status", default = "implemented" },
 ]

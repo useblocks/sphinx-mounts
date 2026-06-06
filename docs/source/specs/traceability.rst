@@ -4,33 +4,9 @@ Traceability
 The needs form a closed loop of *outgoing* links (each schema-validatable),
 authored in three places: RST (``story``, ``feat``, ``err``, ``check``,
 ``restriction``), the package source (``impl``), and the test suite
-(``test``). See :doc:`approach` for what each link means.
-
-Need & link structure
-----------------------
-
-.. mermaid::
-
-   flowchart LR
-       test["test (TEST_)"]
-       check["check (CHECK_)"]
-       rest["restriction (REST_)"]
-       err["err (ERR_)"]
-       feat["feat (FEAT_)"]
-       story["story (STORY_)"]
-       impl["impl (IMPL_)"]
-
-       test -->|prevents| err
-       check -->|detects| err
-       rest -->|avoids| err
-       err -->|affects| feat
-       feat -->|realizes| story
-       impl -->|links| feat
-
-Reading right to left: a **story** is realized by **features**; each feature
-is implemented by **impl** code and can exhibit **errors**; each error is
-treated by a **test** (prevention), a **check** (runtime detection), or a
-**restriction** (usage constraint).
+(``test``). The :doc:`approach` page carries the node/link diagram and
+explains what each link means; this page renders the live tables and source
+traces.
 
 Agile spine
 -----------
@@ -71,15 +47,15 @@ Implementation needs (``src/``) — each ``:links:`` the feature it implements:
    :columns: id, title, links, status
    :style: table
 
-Test needs (``tests/``) — each ``:prevents:`` the error it structurally rules
-out:
+Test needs (``tests/``) — each ``:verifies:`` a feature and may also
+``:prevents:`` an error:
 
 .. src-trace::
    :project: sphinx_mounts_tests
 
-.. needtable:: Test needs and the error each prevents
+.. needtable:: Test needs — feature verified and any error prevented
    :types: test
-   :columns: id, title, prevents, status
+   :columns: id, title, verifies, prevents, status
    :style: table
 
 .. note:: Backlink coverage is not yet schema-validatable (sphinx-needs #1590)

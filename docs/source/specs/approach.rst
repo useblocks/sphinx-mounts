@@ -6,6 +6,32 @@ sphinx-mounts pairs **agile terminology** with the tool-error reasoning of
 spine captures intent; the tool-error layer captures how the tool is kept
 trustworthy.
 
+Model at a glance
+-----------------
+
+.. mermaid::
+
+   flowchart LR
+       test["test (TEST_)"]
+       check["check (CHECK_)"]
+       rest["restriction (REST_)"]
+       err["err (ERR_)"]
+       feat["feat (FEAT_)"]
+       story["story (STORY_)"]
+       impl["impl (IMPL_)"]
+
+       test -->|verifies| feat
+       test -.->|prevents| err
+       check -->|detects| err
+       rest -->|avoids| err
+       err -->|affects| feat
+       feat -->|realizes| story
+       impl -->|links| feat
+
+Solid edges are mandatory for that need type; the dotted ``prevents`` edge is
+optional — a test always ``:verifies:`` a feature and *may* also
+``:prevents:`` an error.
+
 Agile spine
 -----------
 
@@ -26,9 +52,10 @@ output.
 That confidence comes from **treating** every error in one of two ways:
 
 **Prevention — the error cannot occur.**
-   A **test** (``test``) ``:prevents:`` the error: it proves, structurally,
-   that the condition is ruled out (e.g. a guard raises and a test asserts
-   it). A prevented error cannot reach the output.
+   A **test** (``test``) — which ``:verifies:`` the feature it exercises —
+   also ``:prevents:`` the error: it proves, structurally, that the condition
+   is ruled out (e.g. a guard raises and the test asserts it). A prevented
+   error cannot reach the output.
 
 **Mitigation — the error can occur, but is contained.**
    For errors that cannot be ruled out structurally, one of:
