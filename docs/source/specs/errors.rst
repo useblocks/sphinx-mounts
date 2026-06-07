@@ -19,8 +19,7 @@ Prevented by a test
 
    Two mounts — or a mount and a host document — can produce the same
    docname, which would silently shadow content. Registration raises
-   ``ValueError`` naming both contributors. Prevented structurally by
-   ``TEST_COLLISION_001``.
+   ``ValueError`` naming both contributors.
 
 .. err:: File-list entry has an unregistered suffix
    :id: ERR_BADSUFFIX_001
@@ -31,8 +30,7 @@ Prevented by a test
 
    In file-list mode a file whose suffix is not one of the project's
    ``source_suffix`` values cannot become a docname. The extension raises
-   ``ValueError`` rather than mounting it silently. Prevented structurally by
-   ``TEST_BADSUFFIX_001``.
+   ``ValueError`` rather than mounting it silently.
 
 .. err:: toctree_index out of range for the host document
    :id: ERR_TOCIDX_001
@@ -43,8 +41,7 @@ Prevented by a test
 
    A mount can request a ``toctree_index`` larger than the number of toctrees
    present in the host document. The extension raises ``ExtensionError``
-   rather than leaving the mount unreferenced. Prevented structurally by
-   ``TEST_TOCIDX_001``.
+   rather than leaving the mount unreferenced.
 
 Mitigated by a check
 --------------------
@@ -59,8 +56,8 @@ Mitigated by a check
    A mount can resolve to nothing — a mistyped ``dir``, or a parent
    ``.gitignore`` that hides every file — and the build still succeeds, just
    without the expected pages. This cannot be ruled out structurally (an
-   empty directory is legal), so it is detected at runtime by
-   ``CHECK_MOUNTCOUNT_001``.
+   empty directory is legal), so it is detected at runtime rather than
+   prevented.
 
 Avoided by a restriction
 ------------------------
@@ -74,5 +71,5 @@ Avoided by a restriction
 
    A deep mounted tree can produce absolute paths longer than the Windows
    ``MAX_PATH`` (260-character) limit, which fails the read. The condition is
-   environmental, not structural, so it is avoided by ``REST_WINPATH_001``
+   environmental, not structural, so it is avoided by a usage restriction
    rather than prevented in code.
