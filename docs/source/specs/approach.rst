@@ -12,7 +12,10 @@ Model at a glance
 .. mermaid::
 
    flowchart LR
-       test["test (TEST_)"]
+       subgraph codelinks["Codelinks"]
+           test["test (TEST_)"]
+           impl["impl (IMPL_)"]
+       end
        subgraph mitigation["Mitigation"]
            check["check (CHECK_)"]
            rest["restriction (REST_)"]
@@ -20,7 +23,6 @@ Model at a glance
        err["err (ERR_)"]
        feat["feat (FEAT_)"]
        story["story (STORY_)"]
-       impl["impl (IMPL_)"]
 
        test -->|verifies| feat
        test -.->|prevents| err
@@ -39,12 +41,14 @@ Model at a glance
        style impl fill:#DF744A,stroke:#333,color:#000
        style test fill:#00CED1,stroke:#333,color:#000
        style mitigation fill:#FCFCFC,stroke:#888,stroke-dasharray:5 4,color:#000
+       style codelinks fill:#F4F8FB,stroke:#5B9BD5,stroke-dasharray:5 4,color:#000
 
 Solid edges are mandatory for that need type; the dotted ``prevents`` edge is
 optional — a test always ``:verifies:`` a feature and *may* also
 ``:prevents:`` an error. The **Mitigation** frame groups the two mitigation
-treatments (``check`` and ``restriction``); prevention (``test``) sits outside
-it.
+treatments (``check`` and ``restriction``); the **Codelinks** frame groups the
+needs authored in code as sphinx-codelinks one-line comments (``test`` in
+``tests/``, ``impl`` in ``src/``).
 
 Agile spine
 -----------
