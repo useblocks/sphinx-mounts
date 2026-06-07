@@ -168,7 +168,7 @@ style = "node"
 directive = "test"
 title = "Test"
 prefix = "TEST_"
-color = "#DarkTurquoise"
+color = "#00CED1"
 style = "node"
 
 # ---------------------------------------------------------------------------

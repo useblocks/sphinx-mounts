@@ -28,6 +28,15 @@ Model at a glance
        feat -->|realizes| story
        impl -->|links| feat
 
+       %% node fills match each need type's declared color in ubproject.toml
+       style story fill:#E8DAEF,stroke:#333,color:#000
+       style feat fill:#BFD8D2,stroke:#333,color:#000
+       style err fill:#F5B7B1,stroke:#333,color:#000
+       style check fill:#A9DFBF,stroke:#333,color:#000
+       style rest fill:#FAD7A0,stroke:#333,color:#000
+       style impl fill:#DF744A,stroke:#333,color:#000
+       style test fill:#00CED1,stroke:#333,color:#000
+
 Solid edges are mandatory for that need type; the dotted ``prevents`` edge is
 optional — a test always ``:verifies:`` a feature and *may* also
 ``:prevents:`` an error.
