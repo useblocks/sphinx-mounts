@@ -19,8 +19,7 @@ verification — usually a CI step — that fails if the error appears.
 
    A CI step parses the build's ``needs.json`` / output and fails if any
    configured mount contributed zero documents, catching a mount that
-   silently resolved to nothing (wrong path, parent ``.gitignore``). Status
-   is ``in_progress`` until the CI job is wired up.
+   silently resolved to nothing (wrong path, parent ``.gitignore``).
 
 Restrictions
 ------------
