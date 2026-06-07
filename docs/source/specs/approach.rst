@@ -13,8 +13,10 @@ Model at a glance
 
    flowchart LR
        test["test (TEST_)"]
-       check["check (CHECK_)"]
-       rest["restriction (REST_)"]
+       subgraph mitigation["Mitigation"]
+           check["check (CHECK_)"]
+           rest["restriction (REST_)"]
+       end
        err["err (ERR_)"]
        feat["feat (FEAT_)"]
        story["story (STORY_)"]
@@ -36,10 +38,13 @@ Model at a glance
        style rest fill:#FAD7A0,stroke:#333,color:#000
        style impl fill:#DF744A,stroke:#333,color:#000
        style test fill:#00CED1,stroke:#333,color:#000
+       style mitigation fill:#FCFCFC,stroke:#888,stroke-dasharray:5 4,color:#000
 
 Solid edges are mandatory for that need type; the dotted ``prevents`` edge is
 optional — a test always ``:verifies:`` a feature and *may* also
-``:prevents:`` an error.
+``:prevents:`` an error. The **Mitigation** frame groups the two mitigation
+treatments (``check`` and ``restriction``); prevention (``test``) sits outside
+it.
 
 Agile spine
 -----------
