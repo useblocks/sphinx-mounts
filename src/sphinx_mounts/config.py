@@ -460,6 +460,7 @@ def load_mounts_from_toml(toml_path: Path) -> list[dict[str, Any]] | None:
     :raises TomlConfigError: If the file exists but is not valid TOML, or
         if the top-level ``mounts`` key has the wrong shape.
     """
+    # @ TOML mount loading and path anchoring, IMPL_TOMLCONF_001, [FEAT_TOMLCONF_001]
     if not toml_path.is_file():
         return None
     try:

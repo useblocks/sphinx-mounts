@@ -1,0 +1,20 @@
+# id-conventions.yaml — declared prefixes and the canonical ID regex.
+#
+# Validates against schemas/id-conventions.schema.json.
+#
+# `prefixes` mirrors [[needs.types]] in docs/ubproject.toml. `id_regex`
+# matches the same shape declared there: one of the type prefixes, a
+# SCREAMING_SNAKE domain token, and a 3-digit ordinal — e.g.
+# STORY_MOUNT_001, FEAT_DIRMOUNT_001, ERR_LONGPATH_001, REST_WINPATH_001.
+
+prefixes:
+  story: STORY_
+  feat: FEAT_
+  err: ERR_
+  test: TEST_
+  check: CHECK_
+  restriction: REST_
+  impl: IMPL_
+
+id_regex: "^(STORY|FEAT|ERR|TEST|CHECK|REST|IMPL)_[A-Z0-9_]*[0-9]{3}$"
+separator: "_"

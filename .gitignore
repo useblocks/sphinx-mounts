@@ -31,3 +31,10 @@ bazel-*
 # Local-only AI agent workflow artifacts (specs, plans, etc.) — never commit.
 docs/superpowers/
 /prompts.md
+
+# Pharaoh ephemeral state (do not commit). Project tailoring at
+# .pharaoh/project/ IS committed and shared with the team.
+.pharaoh/runs/
+.pharaoh/plans/
+.pharaoh/session.json
+.pharaoh/cache/

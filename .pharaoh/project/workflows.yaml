@@ -1,0 +1,30 @@
+# workflows.yaml — Pharaoh project-wide lifecycle state machine.
+#
+# Validates against the Pharaoh schemas/workflows.schema.json.
+#
+# Agile lifecycle: a need is identified (open), worked on (in_progress), and
+# done (implemented). There is deliberately no terminal "closed"/"deprecated"
+# state — an implemented need is finished, and a need that no longer applies
+# is deleted from the repository rather than retired in place. The same three
+# states are enforced at build time via the status field enum in
+# docs/ubproject.toml ([needs.fields.status]).
+
+lifecycle_states:
+  - open
+  - in_progress
+  - implemented
+
+transitions:
+  - from: open
+    to: in_progress
+    requires: []
+  - from: in_progress
+    to: implemented
+    requires: []
+  # Rework paths (e.g. an implemented need reopened by a change).
+  - from: in_progress
+    to: open
+    requires: []
+  - from: implemented
+    to: in_progress
+    requires: []

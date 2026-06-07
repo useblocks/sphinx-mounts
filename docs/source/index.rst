@@ -55,6 +55,7 @@ Use cases:
    usage
    integration
    bazel
+   specs/index
    changelog
 
 .. _related-projects:

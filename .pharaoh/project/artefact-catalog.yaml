@@ -1,0 +1,85 @@
+# artefact-catalog.yaml — per-type contract for every declared need type.
+#
+# Validates against schemas/artefact-catalog.schema.json.
+#
+# Agile spine + ISO 26262-8 §11 tool-error layer (see
+# docs/source/specs/approach.rst):
+#   story        agile user story
+#   feat         feature, :realizes: a story
+#   err          potential tool error, :affects: a feat
+#   test         :prevents: an err (structural prevention; one-line need in tests/)
+#   check        :detects: an err (runtime/CI mitigation; RST)
+#   restriction  :avoids: an err (usage-constraint mitigation; RST)
+#   impl         :links: a feat (code trace; one-line need in src/)
+#
+# required_links names the outgoing relation every need of that type must
+# carry. The *incoming* OR-rule "every err has at least one treatment
+# (test/check/restriction)" is not representable here (AND semantics) — it is
+# a checklist item and an upstream gap (sphinx-needs#1590).
+
+story:
+  required_fields: [id, status, title]
+  optional_fields: [issue]
+  lifecycle: [open, in_progress, implemented]
+  required_links: []
+  optional_links: []
+  required_metadata_fields: [status]
+  required_roles: []
+
+feat:
+  required_fields: [id, status, title, source_doc]
+  optional_fields: [issue]
+  lifecycle: [open, in_progress, implemented]
+  required_links: [realizes]
+  optional_links: []
+  required_metadata_fields: [status, source_doc]
+  required_roles: []
+
+err:
+  required_fields: [id, status, title, source_doc]
+  optional_fields: [issue, severity]
+  lifecycle: [open, in_progress, implemented]
+  required_links: [affects]
+  optional_links: []
+  required_metadata_fields: [status, source_doc, severity]
+  required_roles: []
+
+test:
+  required_fields: [id, status, title]
+  optional_fields: []
+  lifecycle: [open, in_progress, implemented]
+  required_links: [verifies]
+  optional_links: [prevents]
+  required_metadata_fields: [status]
+  required_roles: []
+
+check:
+  required_fields: [id, status, title]
+  optional_fields: []
+  lifecycle: [open, in_progress, implemented]
+  required_links: [detects]
+  optional_links: []
+  required_metadata_fields: [status]
+  required_roles: []
+
+restriction:
+  required_fields: [id, status, title]
+  optional_fields: []
+  lifecycle: [open, in_progress, implemented]
+  required_links: [avoids]
+  optional_links: []
+  required_metadata_fields: [status]
+  required_roles: []
+
+# impl needs are authored in src/ as one-line needs and carry a non-empty
+# built-in `links` to their feat — guaranteed by the mandatory one-line field
+# and checked by the "impl -> feat" chain in pharaoh.toml (kept out of
+# required_links here, which lists named extra-link relations).
+impl:
+  required_fields: [id, status, title]
+  optional_fields: []
+  lifecycle: [open, in_progress, implemented]
+  required_links: []
+  optional_links: []
+  required_metadata_fields: [status]
+  required_roles: []

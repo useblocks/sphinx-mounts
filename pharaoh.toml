@@ -1,0 +1,48 @@
+# Pharaoh project configuration.
+#
+# Pharaoh wraps a sphinx-needs project with authoring, review, and audit
+# skills. This file controls *Pharaoh's* behaviour only — need types, link
+# options, custom fields, statuses, and id_regex live in
+# ``docs/ubproject.toml`` and are not duplicated here.
+
+[pharaoh]
+strictness = "advisory"
+
+[pharaoh.id_scheme]
+# IDs are <TYPE-PREFIX>_<DOMAIN>_<NNN>, e.g. STORY_MOUNT_001, FEAT_DIRMOUNT_001,
+# ERR_LONGPATH_001, REST_WINPATH_001. The authoritative, machine-checkable
+# regex lives in .pharaoh/project/id-conventions.yaml; this pattern is the
+# descriptive hint used by pharaoh-id-allocate.
+pattern = "{PREFIX}{DOMAIN}_{NUMBER}"
+auto_increment = true
+
+[pharaoh.workflow]
+mode = "reverse-eng"
+# Reverse-engineering an existing codebase: needs are authored from code that
+# already exists. Verification matters from day one; change-analysis and the
+# MECE release gate stay off until the catalogue stabilises.
+require_change_analysis = false
+require_verification = true
+require_mece_on_release = false
+
+[pharaoh.traceability]
+# "source-type -> target-type": every need of source-type must carry at least
+# one outgoing link that reaches a target-type need.
+required_links = [
+  "feat -> story",      # every feature realizes a user story
+  "err -> feat",        # every error affects a feature
+  "impl -> feat",       # every impl links the feature it implements
+  "test -> feat",       # every test verifies the feature it exercises
+  "check -> err",       # every check detects an error
+  "restriction -> err", # every restriction avoids an error
+]
+# NOT a hard chain: "every err has at least one treatment (test / check /
+# restriction)". That is an *incoming* OR-rule on err, which required_links
+# (outgoing, AND semantics) cannot express — enforced via the err review
+# checklist and tracked upstream (sphinx-needs#1590).
+
+[pharaoh.codelinks]
+# sphinx-codelinks is loaded by docs/conf.py and configured under the
+# [codelinks] table in docs/ubproject.toml. Two one-line-need projects:
+# impl needs in src/ (:links: a feat) and test needs in tests/ (:prevents: an err).
+enabled = true

@@ -105,6 +105,7 @@ def _on_doctree_read(app: Sphinx, doctree: nodes.document) -> None:
     :class:`ExtensionError` — silent misconfiguration would leave the
     mount unreferenced.
     """
+    # @ Toctree injection on doctree-read, IMPL_TOCWIRE_001, [FEAT_TOCWIRE_001]
     parsed: tuple[MountConfig, ...] = getattr(app, _CACHED_KEY, ())
     if not parsed:
         return

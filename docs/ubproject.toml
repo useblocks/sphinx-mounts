@@ -2,11 +2,8 @@
 # importantly the ubCode language server (https://ubcode.useblocks.com/),
 # but also any other static reader (IDE plugins, indexers, CI gates)
 # that wants to understand this project's documentation setup without
-# evaluating ``conf.py``.
-#
-# This project does *not* use sphinx-needs, but the file is still useful:
-# it tells ubCode which schema to validate against and how to behave
-# while editing.
+# evaluating ``conf.py``. The TOML form also drives sphinx-needs itself
+# via ``needs_from_toml = "ubproject.toml"`` set in ``conf.py``.
 "$schema" = "https://ubcode.useblocks.com/ubproject.schema.json"
 
 # Make the language server reindex the project automatically whenever a
@@ -14,3 +11,231 @@
 # the latest edits without having to trigger a manual rebuild.
 [server]
 index_on_save = true
+
+# ---------------------------------------------------------------------------
+# Sphinx-Needs configuration — agile terminology, ISO 26262-8 §11 reasoning.
+#
+# An agile spine (story -> feature) carries the tool's intent; an ISO 26262
+# tool-error layer hangs off each feature and records how every potential
+# tool error is prevented or mitigated. See docs/source/specs/approach.rst.
+#
+#   story        — agile user story (the demand).
+#   feat         — a feature; ``:realizes:`` a story.
+#   err          — a potential *tool error* of a feature; ``:affects:`` a feat.
+#   test         — a test case that ``:verifies:`` a feat (it exercises the
+#                  feature) and may also ``:prevents:`` an err (proving the
+#                  error cannot occur structurally). Authored as a one-line
+#                  sphinx-codelinks need in tests/.
+#   check        — a runtime / CI check that ``:detects:`` an err (e.g. greps
+#                  the build log via another tool to confirm it did not occur).
+#   restriction  — a usage restriction that ``:avoids:`` an err (e.g. "enable
+#                  long-path support, or do not run on Windows").
+#   impl         — implementation marker; ``:links:`` the feat it implements.
+#                  Authored as a one-line sphinx-codelinks need in src/.
+#
+# An error is *treated* by EITHER a test (prevention — error cannot occur) OR
+# a mitigation for errors that can occur: a check (runtime detection) or a
+# restriction (usage constraint). test / check / restriction are the ISO
+# 26262-8 §11 error prevention/detection measures behind the tool-confidence
+# argument.
+#
+# Lifecycle is ``open -> in_progress -> implemented`` (see
+# ``.pharaoh/project/workflows.yaml``). There is no terminal "closed": an
+# implemented need is done; a need that no longer applies is deleted.
+#
+# Every link is *outgoing* (schema-validatable). The *incoming* rules
+# ("every feat has an impl", "every err has a treatment") are not yet
+# expressible in sphinx-needs schema validation —
+# https://github.com/useblocks/sphinx-needs/issues/1590.
+# ---------------------------------------------------------------------------
+[needs]
+build_json = true
+
+# Force the author to set an ID by hand. A title-derived auto-ID would
+# break every inbound link the moment someone reworded the title.
+id_required = true
+
+# Allowed ID shape: one of the declared type prefixes, a SCREAMING_SNAKE
+# domain token, and a 3-digit ordinal — e.g. ``FEAT_DIRMOUNT_001``,
+# ``ERR_LONGPATH_001``, ``REST_WINPATH_001``. Kept in sync with
+# ``.pharaoh/project/id-conventions.yaml``.
+id_regex = "(STORY|FEAT|ERR|TEST|CHECK|REST|IMPL)_[A-Z0-9_]*[0-9]{3}"
+
+# Allowed lifecycle states, enforced via the built-in ``status`` field's
+# schema enum. (The older ``[[needs.statuses]]`` table is deprecated in
+# sphinx-needs 8.x.) A ``:status:`` outside this set becomes a
+# schema-validation finding — and an error under ``sphinx-build -W``.
+[needs.fields.status]
+description = "Lifecycle state: open -> in_progress -> implemented."
+schema = { type = "string", enum = ["open", "in_progress", "implemented"] }
+
+# --- Custom fields (sphinx-needs 8.x [needs.fields.<name>] shape) ---------
+[needs.fields.source_doc]
+description = "Path(s) under the repo root of the source file(s) relevant to this need (comma-separated). Forward need -> code trace."
+schema = { type = "string" }
+nullable = true
+default = ""
+
+[needs.fields.issue]
+description = "GitHub issue number tracking the underlying work, if any."
+schema = { type = "string" }
+nullable = true
+default = ""
+
+[needs.fields.severity]
+description = "For errors: impact if the condition is hit unguarded — one of low / medium / high."
+schema = { type = "string" }
+nullable = true
+default = ""
+
+# --- Link types (sphinx-needs 8.x [needs.links.<name>] shape) -------------
+[needs.links.realizes]
+description = "feat -> story: the feature realizes (delivers) the user story."
+incoming = "realized by"
+outgoing = "realizes"
+
+[needs.links.affects]
+description = "err -> feat: the error is a potential failure of the feature."
+incoming = "can fail with"
+outgoing = "affects"
+
+[needs.links.verifies]
+description = "test -> feat: the test exercises and verifies the feature."
+incoming = "verified by"
+outgoing = "verifies"
+
+[needs.links.prevents]
+description = "test -> err: the test also proves an error cannot occur structurally (prevention)."
+incoming = "prevented by"
+outgoing = "prevents"
+
+[needs.links.detects]
+description = "check -> err: a runtime / CI check detects whether the error occurred (mitigation)."
+incoming = "detected by"
+outgoing = "detects"
+
+[needs.links.avoids]
+description = "restriction -> err: the restriction constrains usage so the error cannot arise (mitigation)."
+incoming = "avoided by"
+outgoing = "avoids"
+
+# --- Need types ------------------------------------------------------------
+[[needs.types]]
+directive = "story"
+title = "Story"
+prefix = "STORY_"
+color = "#E8DAEF"
+style = "node"
+
+[[needs.types]]
+directive = "feat"
+title = "Feature"
+prefix = "FEAT_"
+color = "#BFD8D2"
+style = "node"
+
+[[needs.types]]
+directive = "err"
+title = "Error"
+prefix = "ERR_"
+color = "#F5B7B1"
+style = "node"
+
+[[needs.types]]
+directive = "check"
+title = "Check"
+prefix = "CHECK_"
+color = "#A9DFBF"
+style = "node"
+
+[[needs.types]]
+directive = "restriction"
+title = "Restriction"
+prefix = "REST_"
+color = "#FAD7A0"
+style = "node"
+
+# Authored in source code as sphinx-codelinks one-line needs (see [codelinks]
+# below), not via an RST directive — but still first-class need types.
+[[needs.types]]
+directive = "impl"
+title = "Implementation"
+prefix = "IMPL_"
+color = "#DF744A"
+style = "node"
+
+[[needs.types]]
+directive = "test"
+title = "Test"
+prefix = "TEST_"
+color = "#00CED1"
+style = "node"
+
+# ---------------------------------------------------------------------------
+# sphinx-codelinks configuration.
+#
+# Read by sphinx-codelinks AND ubCode because ``conf.py`` sets
+# ``src_trace_config_from_toml = "ubproject.toml"``. ubCode supports the
+# one-line-need form configured this way. Two projects are scanned:
+#
+#   sphinx_mounts        — src/, one-line ``impl`` needs:
+#                            # @ <title>, <IMPL_id>, [<feat-id>, ...]
+#                          each ``:links:`` the feature(s) it implements.
+#   sphinx_mounts_tests  — tests/, one-line ``test`` needs:
+#                            # @ <title>, <TEST_id>, [<feat-id>], [<err-id>]
+#                          each ``:verifies:`` the feature it exercises and
+#                          may also ``:prevents:`` an error.
+#
+# In both, ``type`` and ``status`` come from field defaults, so they are never
+# written in the comment — the author writes only the title, id, and links.
+# ---------------------------------------------------------------------------
+[codelinks]
+# Copy each marked source file into the build and cross-link the marked line
+# to the need it creates (and back), so the HTML carries source <-> need both
+# ways.
+set_local_url = true
+
+[codelinks.projects.sphinx_mounts.source_discover]
+src_dir = "../src/sphinx_mounts" # relative to confdir (the docs/ directory)
+comment_type = "python"
+gitignore = true
+
+[codelinks.projects.sphinx_mounts.analyse]
+get_oneline_needs = true
+get_need_id_refs = false
+
+# One-line field order. Parsing is POSITIONAL and defaults fill only TRAILING
+# omitted fields, so the two defaulted fields (type, status) must come last —
+# which lets authors write just ``@ title, IMPL_id, [feat-ids]``. The first
+# three (title, id, links) have no default and are therefore mandatory.
+[codelinks.projects.sphinx_mounts.analyse.oneline_comment_style]
+needs_fields = [
+  { name = "title" },
+  { name = "id" },
+  { name = "links", type = "list[str]" },
+  { name = "type", default = "impl" },
+  { name = "status", default = "implemented" },
+]
+
+# Second project: the test suite. A test ``verifies`` the feature it exercises
+# (mandatory) and may also ``prevents`` the error(s) it structurally rules out
+# (optional — write just the feature when there is no error to prevent).
+[codelinks.projects.sphinx_mounts_tests.source_discover]
+src_dir = "../tests"    # relative to confdir (the docs/ directory)
+comment_type = "python"
+gitignore = true
+
+[codelinks.projects.sphinx_mounts_tests.analyse]
+get_oneline_needs = true
+get_need_id_refs = false
+
+[codelinks.projects.sphinx_mounts_tests.analyse.oneline_comment_style]
+needs_fields = [
+  { name = "title" },
+  { name = "id" },
+  { name = "verifies", type = "list[str]" },
+  { name = "prevents", type = "list[str]", default = [
+  ] },
+  { name = "type", default = "test" },
+  { name = "status", default = "implemented" },
+]
