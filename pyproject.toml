@@ -93,6 +93,7 @@ force-sort-within-sections = true
 "**/tests/*" = [
   "ARG001",  # unused-function-argument - fixtures
   "ARG005",  # unused-lambda-argument - monkeypatches
+  "PLR0913", # too-many-arguments - parametrised tests take many fixtures
   "PLR2004", # magic-value-comparison - valuable for tests
   "S101",    # assert - needed for tests
   "S603",    # subprocess - bazel invocation in tests
