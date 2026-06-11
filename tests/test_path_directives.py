@@ -443,3 +443,58 @@ def test_files_mode_escape_fails(make_app, make_host_project, tmp_path):
     with pytest.raises(Exception, match=r"outside its bundle root"):
         app = make_app(srcdir=host, freshenv=True)
         app.build()
+
+
+# ---------- Task 6: leak boundaries (documented with path_check='off') ----------
+
+
+def test_leading_slash_resolves_to_host_srcdir_not_bundle(
+    make_app, make_host_project, tmp_path
+):
+    """Documents that a leading-slash path is 'absolute from the source
+    root' = the HOST srcdir, not the bundle. This is why such a reference
+    is an escape."""
+    bundle = _leaking_literalinclude_bundle(tmp_path, "/host_secret.py")
+    host = make_host_project()
+    (host / "host_secret.py").write_text("HOST_SECRET = 1\n", encoding="utf-8")
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "off"}]
+    )
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)
+
+    deps = _resolved_deps(app, "_g/api/index")
+    assert (host / "host_secret.py").resolve() in deps
+    assert (bundle / "host_secret.py").resolve() not in deps
+
+
+def test_parent_climb_escapes_bundle_root(make_app, make_host_project, tmp_path):
+    """Documents that ``../`` climbing above the bundle root resolves to a
+    path outside the bundle."""
+    bundle = tmp_path / "bundle"
+    (bundle / "sub").mkdir(parents=True)
+    (tmp_path / "outside.py").write_text("OUTSIDE = 1\n", encoding="utf-8")
+    (bundle / "sub" / "page.rst").write_text(
+        "Page\n====\n\n.. literalinclude:: ../../outside.py\n", encoding="utf-8"
+    )
+    (bundle / "index.rst").write_text(
+        "Idx\n===\n\n.. toctree::\n\n   sub/page\n", encoding="utf-8"
+    )
+    host = make_host_project()
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "off"}]
+    )
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)
+
+    deps = _resolved_deps(app, "_g/api/sub/page")
+    assert (tmp_path / "outside.py").resolve() in deps
+    # The escaped path is a sibling of the bundle, not under it.
+    bundle_root = bundle.resolve()
+    assert all(
+        d != bundle_root and bundle_root not in d.parents
+        for d in deps
+        if d.name == "outside.py"
+    )
