@@ -302,3 +302,144 @@ def test_mermaid_file_resolves_within_bundle(make_app, make_host_project, tmp_pa
     assert "not found" not in app._warning.getvalue()
     html = (Path(app.outdir) / "_g" / "api" / "index.html").read_text(encoding="utf-8")
     assert "MERMAID_MARKER" in html
+
+
+# ---------- Task 5: enforcement (path_check) ----------
+
+
+def _leaking_literalinclude_bundle(tmp_path: Path, ref: str) -> Path:
+    """A directory bundle whose index.rst literalinclude's ``ref``."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "index.rst").write_text(
+        f"Bundle\n======\n\n.. literalinclude:: {ref}\n", encoding="utf-8"
+    )
+    return bundle
+
+
+def test_escape_via_leading_slash_fails_by_default(
+    make_app, make_host_project, tmp_path
+):
+    """A leading-slash reference resolves to the host srcdir (outside the
+    bundle); the default path_check='error' fails the build."""
+    bundle = _leaking_literalinclude_bundle(tmp_path, "/host_secret.py")
+    host = make_host_project()
+    (host / "host_secret.py").write_text("HOST_SECRET = 1\n", encoding="utf-8")
+    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    _replace_index_toctree(host, "_g/api/index")
+
+    with pytest.raises(Exception, match=r"outside its bundle root"):
+        app = make_app(srcdir=host, freshenv=True)
+        app.build()
+
+
+def test_escape_via_parent_climb_fails_by_default(
+    make_app, make_host_project, tmp_path
+):
+    """A ``../`` reference that climbs above the bundle root fails by default."""
+    bundle = tmp_path / "bundle"
+    (bundle / "sub").mkdir(parents=True)
+    (tmp_path / "outside.py").write_text("OUTSIDE = 1\n", encoding="utf-8")
+    (bundle / "sub" / "page.rst").write_text(
+        "Page\n====\n\n.. literalinclude:: ../../outside.py\n", encoding="utf-8"
+    )
+    (bundle / "index.rst").write_text(
+        "Idx\n===\n\n.. toctree::\n\n   sub/page\n", encoding="utf-8"
+    )
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    _replace_index_toctree(host, "_g/api/index")
+
+    with pytest.raises(Exception, match=r"outside its bundle root"):
+        app = make_app(srcdir=host, freshenv=True)
+        app.build()
+
+
+def test_enforcement_is_directive_agnostic_include(
+    make_app, make_host_project, tmp_path
+):
+    """A docutils-native ``include`` that climbs out is caught too — the
+    check keys off env.dependencies, not the directive type."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (tmp_path / "outside_inc.txt").write_text(
+        "Outside\n-------\n\nOUTSIDE_INC\n", encoding="utf-8"
+    )
+    (bundle / "index.rst").write_text(
+        "Bundle\n======\n\n.. include:: ../outside_inc.txt\n", encoding="utf-8"
+    )
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    _replace_index_toctree(host, "_g/api/index")
+
+    with pytest.raises(Exception, match=r"outside its bundle root"):
+        app = make_app(srcdir=host, freshenv=True)
+        app.build()
+
+
+def test_path_check_warn_emits_warning_not_error(
+    make_app, make_host_project, tmp_path
+):
+    bundle = _leaking_literalinclude_bundle(tmp_path, "/host_secret.py")
+    host = make_host_project()
+    (host / "host_secret.py").write_text("HOST_SECRET = 1\n", encoding="utf-8")
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "warn"}]
+    )
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)  # must NOT raise
+
+    assert "outside its bundle root" in app._warning.getvalue()
+
+
+def test_path_check_off_allows_escape(make_app, make_host_project, tmp_path):
+    bundle = _leaking_literalinclude_bundle(tmp_path, "/host_secret.py")
+    host = make_host_project()
+    (host / "host_secret.py").write_text("HOST_SECRET = 1\n", encoding="utf-8")
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "off"}]
+    )
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)
+
+    assert "outside its bundle root" not in app._warning.getvalue()
+    # The leaked host file content really did render (documents the leak).
+    html = (Path(app.outdir) / "_g" / "api" / "index.html").read_text(encoding="utf-8")
+    assert "HOST_SECRET" in html
+
+
+def test_self_contained_bundle_passes_under_default_error(
+    make_app, make_host_project, tmp_path
+):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "snippet.py").write_text("OK = 1\n", encoding="utf-8")
+    (bundle / "index.rst").write_text(
+        "Bundle\n======\n\n.. literalinclude:: snippet.py\n", encoding="utf-8"
+    )
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)
+
+    assert "outside its bundle root" not in app._warning.getvalue()
+
+
+def test_files_mode_escape_fails(make_app, make_host_project, tmp_path):
+    """In file-list mode the bundle root is the listed file's parent dir."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (tmp_path / "secret.py").write_text("SECRET = 1\n", encoding="utf-8")  # outside pkg
+    (pkg / "page.rst").write_text(
+        "Page\n====\n\n.. literalinclude:: ../secret.py\n", encoding="utf-8"
+    )
+    host = make_host_project()
+    write_ubproject_toml(host, [{"files": [str(pkg / "page.rst")], "mount_at": "_g/api"}])
+    _replace_index_toctree(host, "_g/api/page")
+
+    with pytest.raises(Exception, match=r"outside its bundle root"):
+        app = make_app(srcdir=host, freshenv=True)
+        app.build()
