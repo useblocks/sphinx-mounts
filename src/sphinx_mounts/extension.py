@@ -211,7 +211,7 @@ def _on_check_path_confinement(app: Sphinx, env: Any) -> None:  # noqa: ARG001
                 f"outside its bundle root: {abs_dep} is not under {resolved_root}. "
                 f"Mounted bundles must be self-contained — use a path "
                 f"relative to the bundle root (no leading '/', and no '..' "
-                f"climbing above the bundle). Set path_check = \"warn\" or "
+                f'climbing above the bundle). Set path_check = "warn" or '
                 f'"off" on the mount to relax this check.'
             )
             if mode == "error":

@@ -175,10 +175,7 @@ class MountConfig:
             raise MountConfigError(msg)
 
         if not isinstance(self.path_check, str):
-            msg = (
-                f"path_check must be a string; "
-                f"got {type(self.path_check).__name__}."
-            )
+            msg = f"path_check must be a string; got {type(self.path_check).__name__}."
             raise MountConfigError(msg)
         if self.path_check not in {"error", "warn", "off"}:
             msg = (

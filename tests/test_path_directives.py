@@ -77,8 +77,11 @@ def _tiny_png() -> bytes:
 
     ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
     idat = zlib.compress(b"\x00\xff\x00\x00")
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(
-        b"IEND", b""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", idat)
+        + chunk(b"IEND", b"")
     )
 
 
@@ -112,7 +115,13 @@ def test_doc_roots_files_mode_uses_file_parent_dir(
     host = make_host_project()
     write_ubproject_toml(
         host,
-        [{"files": [str(pkg / "page.rst")], "mount_at": "_g/api", "path_check": "warn"}],
+        [
+            {
+                "files": [str(pkg / "page.rst")],
+                "mount_at": "_g/api",
+                "path_check": "warn",
+            }
+        ],
     )
     _replace_index_toctree(host, "_g/api/page")
 
@@ -156,7 +165,9 @@ TEXT_CASES = [
 ]
 
 
-@pytest.mark.parametrize("directive_rst, target_name, target_content, marker", TEXT_CASES)
+@pytest.mark.parametrize(
+    "directive_rst, target_name, target_content, marker", TEXT_CASES
+)
 def test_text_directive_reads_file_from_bundle(
     make_app,
     make_host_project,
@@ -217,9 +228,7 @@ def test_literalinclude_prefers_bundle_over_host_decoy(
     assert "HOST_DECOY" not in html
 
 
-def test_image_and_figure_resolve_within_bundle(
-    make_app, make_host_project, tmp_path
-):
+def test_image_and_figure_resolve_within_bundle(make_app, make_host_project, tmp_path):
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     (bundle / "pic.png").write_bytes(_tiny_png())
@@ -284,8 +293,7 @@ def test_mermaid_file_resolves_within_bundle(make_app, make_host_project, tmp_pa
     pytest.importorskip("sphinxcontrib.mermaid")
     bundle = tmp_path / "bundle"
     bundle.mkdir()
-    (bundle / "f.mmd").write_text("graph TD\n  A[MERMAID_MARKER]\n", encoding="utf-8"
-    )
+    (bundle / "f.mmd").write_text("graph TD\n  A[MERMAID_MARKER]\n", encoding="utf-8")
     (bundle / "index.rst").write_text(
         "Bundle\n======\n\n.. mermaid:: f.mmd\n", encoding="utf-8"
     )
@@ -377,9 +385,7 @@ def test_enforcement_is_directive_agnostic_include(
         app.build()
 
 
-def test_path_check_warn_emits_warning_not_error(
-    make_app, make_host_project, tmp_path
-):
+def test_path_check_warn_emits_warning_not_error(make_app, make_host_project, tmp_path):
     bundle = _leaking_literalinclude_bundle(tmp_path, "/host_secret.py")
     host = make_host_project()
     (host / "host_secret.py").write_text("HOST_SECRET = 1\n", encoding="utf-8")
@@ -437,7 +443,9 @@ def test_files_mode_escape_fails(make_app, make_host_project, tmp_path):
         "Page\n====\n\n.. literalinclude:: ../secret.py\n", encoding="utf-8"
     )
     host = make_host_project()
-    write_ubproject_toml(host, [{"files": [str(pkg / "page.rst")], "mount_at": "_g/api"}])
+    write_ubproject_toml(
+        host, [{"files": [str(pkg / "page.rst")], "mount_at": "_g/api"}]
+    )
     _replace_index_toctree(host, "_g/api/page")
 
     with pytest.raises(Exception, match=r"outside its bundle root"):
