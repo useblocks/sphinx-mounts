@@ -498,3 +498,41 @@ def test_parent_climb_escapes_bundle_root(make_app, make_host_project, tmp_path)
         for d in deps
         if d.name == "outside.py"
     )
+
+
+def test_path_check_is_resolved_per_mount(make_app, make_host_project, tmp_path):
+    """Two mounts, different path_check values, resolved independently: an
+    'off' mount with an escaping reference is allowed, while a sibling
+    'error' mount (self-contained) does not fire on the other mount's docs.
+    Proves the check keys off each doc's own mount, not a global setting."""
+    # Mount A: escapes its bundle root, but path_check='off' allows it.
+    a = tmp_path / "a"
+    a.mkdir()
+    (tmp_path / "a_escape.py").write_text("A_ESCAPE = 1\n", encoding="utf-8")
+    (a / "index.rst").write_text(
+        "A\n=\n\n.. literalinclude:: ../a_escape.py\n", encoding="utf-8"
+    )
+    # Mount B: self-contained, path_check='error'.
+    b = tmp_path / "b"
+    b.mkdir()
+    (b / "snippet.py").write_text("B_OK = 1\n", encoding="utf-8")
+    (b / "index.rst").write_text(
+        "B\n=\n\n.. literalinclude:: snippet.py\n", encoding="utf-8"
+    )
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {"dir": str(a), "mount_at": "_g/a", "path_check": "off"},
+            {"dir": str(b), "mount_at": "_g/b", "path_check": "error"},
+        ],
+    )
+    _replace_index_toctree(host, "_g/a/index", "_g/b/index")
+
+    app = _build(make_app, host)  # must NOT raise — A's escape allowed by A's own 'off'
+
+    assert "outside its bundle root" not in app._warning.getvalue()
+    # A's escaped content really rendered (the 'off' mount was not blocked).
+    a_html = (Path(app.outdir) / "_g" / "a" / "index.html").read_text(encoding="utf-8")
+    assert "A_ESCAPE" in a_html

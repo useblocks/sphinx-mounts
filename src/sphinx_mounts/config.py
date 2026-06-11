@@ -100,6 +100,16 @@ class MountConfig:
             Incompatible with a root mount (``mount_at = None``), since
             the host srcdir always exists; that combination is rejected
             at config validation.
+        path_check: How to react when a directive inside a mounted doc
+            references a file outside the bundle root (the bundle root is
+            ``dir`` in directory mode, or the listed file's parent
+            directory in file-list mode). One of ``"error"`` (the
+            default — fail the build), ``"warn"`` (log a warning;
+            escalates to an error under ``sphinx-build -W``), or
+            ``"off"`` (disable the check). An escaping reference would
+            otherwise drag an outside file into the host build (and, for
+            asset directives, copy it into the host's output), so the
+            default is a hard error that keeps bundles self-contained.
     """
 
     mount_at: str | None = None
