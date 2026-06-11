@@ -94,6 +94,7 @@ force-sort-within-sections = true
   "ARG001",  # unused-function-argument - fixtures
   "ARG005",  # unused-lambda-argument - monkeypatches
   "PLR0913", # too-many-arguments - parametrised tests take many fixtures
+  "PLR0915", # too-many-statements - end-to-end tests have many assertions
   "PLR2004", # magic-value-comparison - valuable for tests
   "S101",    # assert - needed for tests
   "S603",    # subprocess - bazel invocation in tests

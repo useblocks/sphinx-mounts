@@ -19,7 +19,9 @@ end-to-end (marked `bazel`, skipped when no `bazel`/`bazelisk` is on
     ├── build_docs.sh                  # wrapper for ``bazel run //:build_docs``
     ├── build_docs_sandbox.sh          # wrapper for ``bazel build //:docs_html``
     ├── bundles/
-    │   ├── api-foo/BUILD.bazel        # 2 RST files emitted by genrules
+    │   ├── api-foo/
+    │   │   ├── BUILD.bazel            # entry + reference + directives-showcase docs
+    │   │   └── diagram.png            # image asset for the showcase
     │   └── api-bar/BUILD.bazel        # 1 Markdown file emitted by genrule
     └── docs/
         ├── conf.py                    # host Sphinx project (RST)
@@ -30,6 +32,11 @@ end-to-end (marked `bazel`, skipped when no `bazel`/`bazelisk` is on
 ## Pipeline
 
 Run the commands below from this directory (`tests/example/`).
+
+> **Building the docs needs `dot` (Graphviz), `java`, and `plantuml` on
+> `PATH`.** The `api-foo` directives showcase renders Graphviz and
+> PlantUML diagrams at build time. Mermaid is configured for client-side
+> (`raw`) rendering, so no `mmdc` binary is required.
 
 1. **Build the bundles with Bazel.**
 
@@ -119,6 +126,14 @@ Run the commands below from this directory (`tests/example/`).
   back into the host project — see
   [Integration → Anti-pattern: mounted sources linking back to the
   host](../../docs/source/integration.rst) for why.
+- **File references stay inside the bundle.** `api-foo` ships a
+  *directives showcase* (`directives.rst`) exercising `literalinclude`,
+  `include`, `csv-table` / `raw` (`:file:`), `image`, `figure`,
+  `graphviz`, `uml`, and `mermaid` — every path relative to the bundle
+  root. Because no reference escapes the bundle, it passes
+  `sphinx-mounts`' `path_check` (default `"error"`) once mounted; a path
+  that pointed into the host (a leading `/`) or climbed out with `..`
+  would fail the build instead.
 
 ## Running the test
 

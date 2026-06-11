@@ -7,6 +7,12 @@
 # code comments, from a service description, from a database — rather
 # than hard-coded ``cat`` commands. The shape (genrule producing files
 # under a Bazel package) is what matters.
+#
+# Besides the entry/reference docs, this bundle ships a "directives
+# showcase" page that exercises every file-referencing directive with
+# paths **relative to the bundle root**. Because the references never
+# leave the bundle, the bundle stays self-contained and survives
+# ``sphinx-mounts``' ``path_check`` (default ``"error"``) after mounting.
 
 genrule(
     name = "gen_index",
@@ -24,6 +30,7 @@ and mounted in place by ``sphinx-mounts``.
    :maxdepth: 1
 
    reference
+   directives
 EOF
 """,
 )
@@ -45,11 +52,169 @@ EOF
 """,
 )
 
+# The directives showcase. Every path below is relative to the bundle
+# root, so the bundle is portable across host projects and ``path_check``
+# (default ``"error"``) passes once the bundle is mounted.
+genrule(
+    name = "gen_directives",
+    outs = ["directives.rst"],
+    cmd = """cat > $@ <<'EOF'
+Directives showcase
+-------------------
+
+API_FOO_DIRECTIVES_MARKER
+
+Every file reference below is **relative to the bundle root**, so the
+bundle stays self-contained and ``sphinx-mounts``' ``path_check``
+(default ``"error"``) is satisfied after the bundle is mounted into a
+host project.
+
+Source listing (``literalinclude``):
+
+.. literalinclude:: snippet.py
+   :language: python
+
+Inlined fragment (``include``):
+
+.. include:: inc.txt
+
+Tabular data (``csv-table`` with ``:file:``):
+
+.. csv-table:: Sample data
+   :file: data.csv
+   :header-rows: 1
+
+Embedded HTML (``raw`` with ``:file:``):
+
+.. raw:: html
+   :file: snippet.html
+
+A bundled image in a subdirectory (``image``):
+
+.. image:: assets/diagram.png
+   :alt: A small bundled image
+
+A bundled figure (``figure``):
+
+.. figure:: assets/diagram.png
+
+   Figure rendered from an image inside the bundle.
+
+A Graphviz diagram from a bundled ``.dot`` file (``graphviz``):
+
+.. graphviz:: graph.dot
+
+A PlantUML diagram from a bundled ``.puml`` file (``uml``):
+
+.. uml:: diagram.puml
+
+A Mermaid diagram from a bundled ``.mmd`` file (``mermaid``):
+
+.. mermaid:: flow.mmd
+EOF
+""",
+)
+
+genrule(
+    name = "gen_snippet",
+    outs = ["snippet.py"],
+    cmd = """cat > $@ <<'EOF'
+# API_FOO_SNIPPET_MARKER
+def greet(name: str) -> str:
+    \"\"\"Return a greeting for ``name``.\"\"\"
+    return f"hello {name}"
+EOF
+""",
+)
+
+genrule(
+    name = "gen_include",
+    outs = ["inc.txt"],
+    cmd = """cat > $@ <<'EOF'
+API_FOO_INCLUDE_MARKER — this paragraph is pulled in by the ``include``
+directive from a file that lives next to the document inside the bundle.
+EOF
+""",
+)
+
+genrule(
+    name = "gen_data",
+    outs = ["data.csv"],
+    cmd = """cat > $@ <<'EOF'
+Name,Value
+API_FOO_CSV_MARKER,42
+threshold,7
+EOF
+""",
+)
+
+genrule(
+    name = "gen_raw",
+    outs = ["snippet.html"],
+    cmd = """cat > $@ <<'EOF'
+<p class="api-foo-raw">API_FOO_RAW_MARKER</p>
+EOF
+""",
+)
+
+genrule(
+    name = "gen_graph",
+    outs = ["graph.dot"],
+    cmd = """cat > $@ <<'EOF'
+digraph api_foo {
+    rankdir = LR;
+    request -> handler -> response;
+}
+EOF
+""",
+)
+
+genrule(
+    name = "gen_uml",
+    outs = ["diagram.puml"],
+    cmd = """cat > $@ <<'EOF'
+@startuml
+Client -> Server : request
+Server --> Client : response
+@enduml
+EOF
+""",
+)
+
+genrule(
+    name = "gen_mermaid",
+    outs = ["flow.mmd"],
+    cmd = """cat > $@ <<'EOF'
+graph TD
+    A[API_FOO_MERMAID_MARKER] --> B[handled]
+EOF
+""",
+)
+
+# The image is a checked-in binary asset (a genrule heredoc can't emit
+# binary cleanly). Copy it into the bundle's ``assets/`` subdirectory so
+# the showcase page can reference it with a bundle-relative subpath.
+genrule(
+    name = "gen_image",
+    srcs = ["diagram.png"],
+    outs = ["assets/diagram.png"],
+    cmd = "cp $< $@",
+)
+
 filegroup(
     name = "bundle",
     srcs = [
+        ":gen_data",
+        ":gen_directives",
+        ":gen_graph",
+        ":gen_image",
+        ":gen_include",
         ":gen_index",
+        ":gen_mermaid",
+        ":gen_raw",
         ":gen_reference",
+        ":gen_snippet",
+        ":gen_uml",
     ],
     visibility = ["//visibility:public"],
 )

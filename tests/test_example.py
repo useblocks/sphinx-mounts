@@ -45,6 +45,18 @@ def test_example_pipeline_end_to_end(tmp_path: Path) -> None:
     if shutil.which("sphinx-build") is None and not _have_sphinx_module():
         pytest.skip("sphinx-build not available")
     pytest.importorskip("myst_parser")
+    # The api-foo bundle's "directives showcase" page renders graphviz and
+    # plantuml diagrams at build time under ``-nW``; skip (don't fail) when
+    # their extensions or binaries are unavailable. Mermaid runs in ``raw``
+    # mode, so no ``mmdc`` binary is required.
+    pytest.importorskip("sphinxcontrib.plantuml")
+    pytest.importorskip("sphinxcontrib.mermaid")
+    for tool in ("dot", "java", "plantuml"):
+        if shutil.which(tool) is None:
+            pytest.skip(
+                f"{tool!r} not on PATH — required to render the api-foo "
+                "directives showcase (graphviz/plantuml) under -nW"
+            )
 
     workspace = tmp_path / "ws"
     shutil.copytree(EXAMPLE_DIR, workspace)
@@ -78,6 +90,11 @@ def test_example_pipeline_end_to_end(tmp_path: Path) -> None:
     bazel_bin = workspace / "bazel-bin" / "bundles"
     assert (bazel_bin / "api-foo" / "index.rst").exists()
     assert (bazel_bin / "api-foo" / "reference.rst").exists()
+    # The directives showcase and the files it references (kept relative
+    # to the bundle root) are materialised alongside the docs.
+    assert (bazel_bin / "api-foo" / "directives.rst").exists()
+    assert (bazel_bin / "api-foo" / "snippet.py").exists()
+    assert (bazel_bin / "api-foo" / "assets" / "diagram.png").exists()
     assert (bazel_bin / "api-bar" / "index.md").exists()
 
     # Run sphinx-build against the host project. -W turns any unresolved
@@ -124,6 +141,23 @@ def test_example_pipeline_end_to_end(tmp_path: Path) -> None:
     )
     assert "API_FOO_INDEX_MARKER" in foo_index
     assert "API_FOO_REFERENCE_MARKER" in foo_ref
+
+    # 2b) The directives showcase rendered. Each file-referencing
+    #     directive resolved its path relative to the bundle root (proving
+    #     mounts handle them, and that the self-contained bundle passes
+    #     path_check): literalinclude/include/csv-table/raw/mermaid embed
+    #     text markers, and image/figure/graphviz/uml emit into _images.
+    foo_directives = (
+        html_out / "_generated" / "api-foo" / "directives.html"
+    ).read_text(encoding="utf-8")
+    assert "API_FOO_DIRECTIVES_MARKER" in foo_directives
+    assert "API_FOO_SNIPPET_MARKER" in foo_directives  # literalinclude
+    assert "API_FOO_INCLUDE_MARKER" in foo_directives  # include
+    assert "API_FOO_CSV_MARKER" in foo_directives  # csv-table :file:
+    assert "API_FOO_RAW_MARKER" in foo_directives  # raw :file:
+    assert "API_FOO_MERMAID_MARKER" in foo_directives  # mermaid (raw mode)
+    assert "_images/" in foo_directives  # image/figure/graphviz/uml outputs
+    assert (html_out / "_images").is_dir()
 
     # 3) Markdown bundle rendered.
     bar_index = (html_out / "_generated" / "api-bar" / "index.html").read_text(
