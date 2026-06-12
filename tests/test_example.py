@@ -1,9 +1,12 @@
 """End-to-end test of the full example under ``tests/example/``.
 
 The example is a complete, checked-in reference setup: a host Sphinx
-project + two Bazel-generated bundles (one RST, one Markdown) wired
-into the host's toctree via ``attach_to``. This test runs the
-pipeline the example's README documents:
+project, two Bazel-generated bundles (one RST, one Markdown), and nine
+checked-in "showcase" bundles — one folder per file-referencing
+directive (literalinclude, include, csv-table, raw, image, figure,
+graphviz, uml, mermaid) — all wired into the host's toctree via
+``attach_to``. This test runs the pipeline the example's README
+documents:
 
 1. Copy the example to a tmp workspace (so the developer's real
    ``bazel-bin/`` is untouched).
@@ -45,17 +48,17 @@ def test_example_pipeline_end_to_end(tmp_path: Path) -> None:
     if shutil.which("sphinx-build") is None and not _have_sphinx_module():
         pytest.skip("sphinx-build not available")
     pytest.importorskip("myst_parser")
-    # The api-foo bundle's "directives showcase" page renders graphviz and
-    # plantuml diagrams at build time under ``-nW``; skip (don't fail) when
-    # their extensions or binaries are unavailable. Mermaid runs in ``raw``
-    # mode, so no ``mmdc`` binary is required.
+    # The showcase bundles render graphviz and plantuml diagrams at build
+    # time under ``-nW``; skip (don't fail) when their extensions or
+    # binaries are unavailable. Mermaid runs in ``raw`` mode, so no
+    # ``mmdc`` binary is required.
     pytest.importorskip("sphinxcontrib.plantuml")
     pytest.importorskip("sphinxcontrib.mermaid")
     for tool in ("dot", "java", "plantuml"):
         if shutil.which(tool) is None:
             pytest.skip(
-                f"{tool!r} not on PATH — required to render the api-foo "
-                "directives showcase (graphviz/plantuml) under -nW"
+                f"{tool!r} not on PATH — required to render the showcase "
+                "graphviz/plantuml bundles under -nW"
             )
 
     workspace = tmp_path / "ws"
@@ -90,12 +93,14 @@ def test_example_pipeline_end_to_end(tmp_path: Path) -> None:
     bazel_bin = workspace / "bazel-bin" / "bundles"
     assert (bazel_bin / "api-foo" / "index.rst").exists()
     assert (bazel_bin / "api-foo" / "reference.rst").exists()
-    # The directives showcase and the files it references (kept relative
-    # to the bundle root) are materialised alongside the docs.
-    assert (bazel_bin / "api-foo" / "directives.rst").exists()
-    assert (bazel_bin / "api-foo" / "snippet.py").exists()
-    assert (bazel_bin / "api-foo" / "assets" / "diagram.png").exists()
     assert (bazel_bin / "api-bar" / "index.md").exists()
+
+    # The directive "showcase" bundles are plain checked-in files (NOT
+    # Bazel-generated): they live under ``showcase/<directive>/`` and are
+    # copied into the workspace as-is, then mounted directly from there.
+    assert (workspace / "showcase" / "literalinclude" / "greeter.py").exists()
+    assert (workspace / "showcase" / "uml" / "sequence.puml").exists()
+    assert (workspace / "showcase" / "csv-table" / "data.csv").exists()
 
     # Run sphinx-build against the host project. -W turns any unresolved
     # reference into a failure, so a broken mount surfaces here.
@@ -142,21 +147,27 @@ def test_example_pipeline_end_to_end(tmp_path: Path) -> None:
     assert "API_FOO_INDEX_MARKER" in foo_index
     assert "API_FOO_REFERENCE_MARKER" in foo_ref
 
-    # 2b) The directives showcase rendered. Each file-referencing
-    #     directive resolved its path relative to the bundle root (proving
-    #     mounts handle them, and that the self-contained bundle passes
-    #     path_check): literalinclude/include/csv-table/raw/mermaid embed
-    #     text markers, and image/figure/graphviz/uml emit into _images.
-    foo_directives = (
-        html_out / "_generated" / "api-foo" / "directives.html"
-    ).read_text(encoding="utf-8")
-    assert "API_FOO_DIRECTIVES_MARKER" in foo_directives
-    assert "API_FOO_SNIPPET_MARKER" in foo_directives  # literalinclude
-    assert "API_FOO_INCLUDE_MARKER" in foo_directives  # include
-    assert "API_FOO_CSV_MARKER" in foo_directives  # csv-table :file:
-    assert "API_FOO_RAW_MARKER" in foo_directives  # raw :file:
-    assert "API_FOO_MERMAID_MARKER" in foo_directives  # mermaid (raw mode)
-    assert "_images/" in foo_directives  # image/figure/graphviz/uml outputs
+    # 2b) Each checked-in "showcase" bundle renders one file-referencing
+    #     directive at _generated/showcase/<directive>/index.html. The
+    #     build succeeding under -nW already proves every directive
+    #     resolved its path *inside* its bundle (and passed path_check);
+    #     these spot-checks confirm the referenced content actually landed.
+    def _showcase(name: str) -> str:
+        return (html_out / "_generated" / "showcase" / name / "index.html").read_text(
+            encoding="utf-8"
+        )
+
+    # Text directives embed the referenced file's content verbatim.
+    assert "SHOWCASE_GREETER" in _showcase("literalinclude")
+    assert "SHOWCASE_INCLUDE_BODY" in _showcase("include")
+    assert "SHOWCASE_CSV_ROW" in _showcase("csv-table")
+    assert "SHOWCASE_RAW_BODY" in _showcase("raw")
+    assert "SHOWCASE_MERMAID_NODE" in _showcase("mermaid")  # mermaid (raw mode)
+    # image / figure / graphviz / uml render to files in the shared _images/.
+    assert "SHOWCASE_IMAGE" in _showcase("image")
+    assert "SHOWCASE_FIGURE" in _showcase("figure")
+    assert "SHOWCASE_GRAPHVIZ" in _showcase("graphviz")
+    assert "SHOWCASE_UML" in _showcase("uml")
     assert (html_out / "_images").is_dir()
 
     # 3) Markdown bundle rendered.
@@ -181,6 +192,11 @@ def test_example_pipeline_end_to_end(tmp_path: Path) -> None:
     )
     assert "_generated/api-foo/index.html" in index_html
     assert "_generated/api-bar/index.html" in index_html
+    # The showcase bundles are wired via attach_to too, so their entry
+    # docs appear in the host index toctree (and never in its source RST).
+    assert "_generated/showcase" not in source_index_rst
+    assert "_generated/showcase/literalinclude/index.html" in index_html
+    assert "_generated/showcase/uml/index.html" in index_html
 
     # 5) Nothing was copied into the host srcdir.
     assert not (docs / "_generated").exists()
