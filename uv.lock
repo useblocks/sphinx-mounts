@@ -821,7 +821,7 @@ testing = [
     { name = "myst-parser", specifier = ">=4.0.0" },
     { name = "pytest", specifier = ">=8.2.2" },
     { name = "pytest-cov", specifier = ">=5.0.0" },
-    { name = "sphinx-needs", git = "https://github.com/useblocks/sphinx-needs.git?rev=master" },
+    { name = "sphinx-needs", git = "https://github.com/useblocks/sphinx-needs.git?rev=fix-1749-plantuml-incdir" },
     { name = "sphinxcontrib-mermaid", specifier = ">=1.0.0" },
     { name = "sphinxcontrib-plantuml", specifier = ">=0.30" },
 ]
@@ -830,7 +830,7 @@ ty = [{ name = "ty", specifier = ">=0.0.37" }]
 [[package]]
 name = "sphinx-needs"
 version = "8.3.0"
-source = { git = "https://github.com/useblocks/sphinx-needs.git?rev=master#d5ebc43dd3af72d30ab068bbd423a95cca314844" }
+source = { git = "https://github.com/useblocks/sphinx-needs.git?rev=fix-1749-plantuml-incdir#b8a550221860e15efb6f1228bc3e318774eb7775" }
 dependencies = [
     { name = "jsonschema-rs" },
     { name = "minijinja" },

@@ -60,13 +60,18 @@ testing = [
   # `:template:`).
   #
   # TODO: swap for `"sphinx-needs>8.3.0"` once that version is released.
-  # The `!include` needs a fix that is on sphinx-needs `master` but not in any
-  # release yet: releases up to 8.3.0 derive PlantUML's working directory from
-  # the logical docname, which does not exist on disk for a mounted document,
-  # so the build fails with the misleading
-  # "plantuml command '...' cannot be run".
+  # The `!include` needs a fix that is in no sphinx-needs release yet: releases
+  # up to 8.3.0 derive PlantUML's working directory from the logical docname,
+  # which does not exist on disk for a mounted document, so the build fails
+  # with the misleading "plantuml command '...' cannot be run".
   # See https://github.com/useblocks/sphinx-needs/issues/1749.
-  "sphinx-needs @ git+https://github.com/useblocks/sphinx-needs.git@master",
+  #
+  # Pinned to the fix's PR branch rather than `master`, so this branch's CI can
+  # exercise the new showcase bundle before the fix lands. That branch goes away
+  # when useblocks/sphinx-needs#1750 is merged and deleted, so this pin must
+  # move on — to `master` if the release is still pending, otherwise straight to
+  # the released constraint above.
+  "sphinx-needs @ git+https://github.com/useblocks/sphinx-needs.git@fix-1749-plantuml-incdir",
 ]
 docs = ["furo>=2024.5.6", "myst-parser>=4.0.0", "sphinx-design>=0.6.1"]
 ty = ["ty>=0.0.37"]
