@@ -60,18 +60,19 @@ testing = [
   # `:template:`).
   #
   # TODO: swap for `"sphinx-needs>8.3.0"` once that version is released.
-  # The `!include` needs a fix that is in no sphinx-needs release yet: releases
-  # up to 8.3.0 derive PlantUML's working directory from the logical docname,
-  # which does not exist on disk for a mounted document, so the build fails
-  # with the misleading "plantuml command '...' cannot be run".
-  # See https://github.com/useblocks/sphinx-needs/issues/1749.
+  # The `!include` needs a fix that is merged on sphinx-needs `master` but is in
+  # no release yet: releases up to 8.3.0 derive PlantUML's working directory from
+  # the logical docname, which does not exist on disk for a mounted document, so
+  # the build fails with the misleading "plantuml command '...' cannot be run".
+  # Merged as useblocks/sphinx-needs#1750; see
+  # https://github.com/useblocks/sphinx-needs/issues/1749.
   #
-  # Pinned to the fix's PR branch rather than `master`, so this branch's CI can
-  # exercise the new showcase bundle before the fix lands. That branch goes away
-  # when useblocks/sphinx-needs#1750 is merged and deleted, so this pin must
-  # move on — to `master` if the release is still pending, otherwise straight to
-  # the released constraint above.
-  "sphinx-needs @ git+https://github.com/useblocks/sphinx-needs.git@fix-1749-plantuml-incdir",
+  # Tracking `master` keeps this branch testable against the real fix before the
+  # release, which is the point of the git pin. `uv.lock` records the exact
+  # commit, so refreshing means `uv lock --upgrade-package sphinx-needs` — the
+  # `prek` CI job runs `uv run --frozen` and needs the lock consistent with this
+  # file.
+  "sphinx-needs @ git+https://github.com/useblocks/sphinx-needs.git@master",
 ]
 docs = ["furo>=2024.5.6", "myst-parser>=4.0.0", "sphinx-design>=0.6.1"]
 ty = ["ty>=0.0.37"]
