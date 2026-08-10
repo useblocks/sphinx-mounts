@@ -114,7 +114,7 @@ def _enforce_strict_mount_at(srcdir: Path, mount: MountConfig) -> None:
     path — files are left to the per-docname check, which catches the
     only case Sphinx actually cares about.
 
-    The violation is a ``mounts_mount_at_occupied`` warning, not an
+    The violation is a ``mounts.mount_at_occupied`` warning, not an
     error: some setups legitimately mount under a host-owned staging
     directory, and the per-docname collision check still guards real
     shadowing. Users who want a hard failure can escalate with
@@ -184,7 +184,7 @@ def _attach_mount_dir(
     directory whose parent gitignores it (the canonical
     ``bazel-bin/...`` case) would silently produce zero files.
 
-    A missing directory is reported as a ``mounts_missing_path``
+    A missing directory is reported as a ``mounts.missing_path``
     warning and skipped, so a build whose upstream bundle is absent
     can still proceed (see :func:`parse_mounts`).
     """
@@ -315,7 +315,7 @@ def _register(
 
     Returns ``True`` when the entry was registered. When the docname is
     already provided — by a host doc or by an earlier mount — the entry is
-    skipped with a ``mounts_docname_conflict`` warning and ``False`` is
+    skipped with a ``mounts.docname_conflict`` warning and ``False`` is
     returned; the first provider wins, so the outcome is deterministic.
     """
     if docname in project.docnames:

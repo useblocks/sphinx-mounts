@@ -105,7 +105,7 @@ def _on_doctree_read(app: Sphinx, doctree: nodes.document) -> None:
     file-list mount, *every* docname the mount produced is appended, in
     ``files`` order. If the host doc contains no toctree at all, a new
     one is added beneath the first section. If ``toctree_index`` exceeds
-    the number of toctrees in the doc, a ``mounts_toctree_index`` warning
+    the number of toctrees in the doc, a ``mounts.toctree_index`` warning
     is emitted and the mount is left unwired — the host doc is never
     modified against the author's layout.
     """
@@ -117,13 +117,18 @@ def _on_doctree_read(app: Sphinx, doctree: nodes.document) -> None:
     if not targets:
         return
 
-    mount_docnames: dict[int, list[str]] = getattr(
-        getattr(app.env, "project", None), "_mount_entry_docnames", {}
-    )
+    project = getattr(app.env, "project", None)
+    mount_docnames: dict[int, list[str]] = getattr(project, "_mount_entry_docnames", {})
+    project_docnames: set[str] | None = getattr(project, "docnames", None)
     toctrees: list[addnodes.toctree] = list(doctree.findall(addnodes.toctree))
 
     for index, mount in targets:
         entries = _mount_toctree_entries(mount, index, mount_docnames)
+        # Gate on project membership: a mount that produced no docnames
+        # (missing bundle, skipped/conflicted entry) must not inject a
+        # dangling, non-suppressible ``toc.not_readable`` reference.
+        if project_docnames is not None:
+            entries = [e for e in entries if e in project_docnames]
         if not entries:
             continue
         target = _select_or_create_toctree(
@@ -179,7 +184,7 @@ def _select_or_create_toctree(
     attach it at the end of the first section, and register it in
     ``toctrees`` so later mounts targeting the same doc reuse it. Otherwise
     return the toctree selected by ``mount.toctree_index``. When the index
-    is out of range, emit a ``mounts_toctree_index`` warning and return
+    is out of range, emit a ``mounts.toctree_index`` warning and return
     ``None`` — the mount is left unwired instead of failing the build.
     """
     if not toctrees:
@@ -257,7 +262,7 @@ def _on_check_path_confinement(app: Sphinx, env: Any) -> None:  # noqa: ARG001
             )
             if mode == "error":
                 raise ExtensionError(msg)
-            log_warning(logger, msg, "path_escape")
+            log_warning(logger, msg, "path_escape", location=docname)
 
 
 def _build_toctree_node(parent: str, entry: str) -> addnodes.toctree:

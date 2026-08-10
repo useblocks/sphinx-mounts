@@ -712,7 +712,7 @@ exclude, since discovery never picks them up.
 .. _warnings-and-errors:
 
 Warnings and errors
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-------------------
 
 sphinx-mounts distinguishes two classes of problems:
 
@@ -725,9 +725,10 @@ errors are deliberately *not* suppressible.
 **Warnings — mount-specific problems.** Everything that affects a single
 mount (or a single file within it) is reported as a warning, the build
 continues with the affected entry skipped, and the first provider of a
-docname wins. Every such warning carries a ``type`` starting with
-``mounts_`` so it can be identified as coming from sphinx-mounts,
-suppressed selectively, and escalated to a failed build:
+docname wins. Every such warning carries the warning ``type`` ``mounts``
+with a per-problem ``subtype``, so it can be identified as coming from
+sphinx-mounts, suppressed selectively (or all at once), and escalated to
+a failed build:
 
 .. list-table::
    :widths: 30 70
@@ -735,31 +736,31 @@ suppressed selectively, and escalated to a failed build:
 
    * - Warning type
      - Meaning
-   * - ``mounts_attach_to_missing``
+   * - ``mounts.attach_to_missing``
      - ``attach_to`` references a docname that does not exist
-   * - ``mounts_docname_conflict``
+   * - ``mounts.docname_conflict``
      - a mount would shadow a docname already provided by the host
        project or an earlier mount; the entry is skipped
-   * - ``mounts_missing_path``
+   * - ``mounts.missing_path``
      - a configured ``dir`` / ``files`` path does not exist on disk;
        the mount (or that file) is skipped
-   * - ``mounts_mount_at_occupied``
+   * - ``mounts.mount_at_occupied``
      - ``strict_mount_at`` is set and the host already has a directory
        at the mount point
-   * - ``mounts_path_escape``
+   * - ``mounts.path_escape``
      - a mounted doc references a file outside its bundle root (with
        ``path_check = "warn"``)
-   * - ``mounts_toctree_index``
+   * - ``mounts.toctree_index``
      - ``toctree_index`` exceeds the number of toctrees in the
        ``attach_to`` document; the mount is not wired in
-   * - ``mounts_unknown_suffix``
+   * - ``mounts.unknown_suffix``
      - a file-list entry has no extension registered in
        ``source_suffix``; the file is skipped
 
 .. _suppressing-mount-warnings:
 
 Suppressing and escalating mount warnings
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Mount warnings are regular Sphinx warnings, so the standard Sphinx
 mechanisms apply. Suppress one problem (or all of them) in ``conf.py``
@@ -768,14 +769,14 @@ via :confval:`suppress_warnings <sphinx:suppress_warnings>`:
 .. code-block:: python
 
    suppress_warnings = [
-       "mounts_docname_conflict",  # just this one
-       "mounts_*",                 # wildcards do NOT work — list each type
+       "mounts",                  # every sphinx-mounts warning
+       "mounts.docname_conflict", # …or just this one problem
    ]
 
-Note that Sphinx matches warning types exactly (``type``, ``type.*``, or
-``type.subtype``), so a ``mounts_*`` wildcard does **not** match the
-single-segment ``mounts_<topic>`` tokens above; list the types you want
-to silence verbatim.
+Sphinx matches warning types exactly (``type``, ``type.*``, or
+``type.subtype``). Listing ``"mounts"`` silences every sphinx-mounts
+warning at once, while ``"mounts.docname_conflict"`` silences only that
+one; individual subtypes and the whole extension can be mixed freely.
 
 To turn any mount problem into a hard build failure instead, build with
 ``sphinx-build -W`` (warnings as errors) — the warning then fails the

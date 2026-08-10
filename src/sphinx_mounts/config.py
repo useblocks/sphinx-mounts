@@ -20,10 +20,15 @@ class TomlConfigError(ExtensionError):
     """Raised when the TOML config file cannot be parsed or is malformed.
 
     Subclasses :class:`sphinx.errors.ExtensionError`, so Sphinx aborts the
-    build with a concise ``Extension error`` message instead of a traceback.
-    Config errors are deliberately *not* suppressible: sphinx-mounts cannot
-    proceed at all when the configuration is unreadable.
+    build with a concise ``Extension error`` message instead of a raw
+    traceback (the crash report on Sphinx ≥ 8 also names this extension via
+    its ``modname``). Config errors are deliberately *not* suppressible:
+    sphinx-mounts cannot proceed at all when the configuration is
+    unreadable.
     """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, modname="sphinx_mounts")
 
 
 class MountConfigError(ExtensionError):
@@ -33,6 +38,9 @@ class MountConfigError(ExtensionError):
     :class:`TomlConfigError` — a malformed entry means the build cannot
     proceed, and users must not be able to suppress it away.
     """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, modname="sphinx_mounts")
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +103,8 @@ class MountConfig:
             to ``0`` (the first toctree). Ignored when ``attach_to`` is
             ``None``. If the document contains no toctree, a new one is
             created and the entry is appended; if the index exceeds the
-            number of toctrees present, the build fails loudly.
+            number of toctrees present, a ``mounts.toctree_index`` warning
+            is emitted and the mount is left unwired.
         entry_doc: Mount-relative docname of the entry document to wire
             into the host toctree. Defaults to ``"index"``. The resulting
             docname is ``f"{mount_at}/{entry_doc}"`` — or just
@@ -109,14 +118,17 @@ class MountConfig:
             Requires ``attach_to``; mutually exclusive with a non-default
             ``entry_doc``; rejected in directory mode. Defaults to
             ``False``.
-        strict_mount_at: When ``True``, fail the build if the host
-            project already has a directory at ``<srcdir>/<mount_at>/``.
+        strict_mount_at: When ``True``, emit a ``mounts.mount_at_occupied``
+            warning (escalating to a failure under ``sphinx-build -W``) if
+            the host project already has a directory at
+            ``<srcdir>/<mount_at>/``.
             Defaults to ``False`` — the existing per-docname collision
             check is the only gate, which lets a mount slot under a
             host-owned staging directory that holds non-source siblings
             (assets, READMEs). Set to ``True`` to treat any host
             directory at ``mount_at`` as a misconfiguration, catching
-            the mistake earlier than per-docname collisions would.
+            the mistake earlier than per-docname collisions would (the
+            check fires even when no concrete docname collides).
             Incompatible with a root mount (``mount_at = None``), since
             the host srcdir always exists; that combination is rejected
             at config validation.
@@ -427,7 +439,7 @@ def parse_mounts(raw: Any, confdir: Path) -> tuple[MountConfig, ...]:
         resolved. These are hard, non-suppressible errors — the build
         cannot proceed with an unreadable configuration. A path that
         resolves but does *not exist on disk* is not an error here: it is
-        reported as a ``mounts_missing_path`` warning at mount time, so a
+        reported as a ``mounts.missing_path`` warning at mount time, so a
         build whose upstream bundle is absent (e.g. CI that has not run the
         Bazel build yet) can still proceed.
     """

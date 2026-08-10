@@ -23,7 +23,7 @@ class TestErrorTaxonomy:
     so Sphinx aborts the build with a concise ``Extension error`` message.
     Users cannot suppress them via ``suppress_warnings`` — an unreadable
     config means sphinx-mounts cannot proceed at all. This is the counter-
-    part to the soft ``mounts_*`` warnings used for mount-specific problems.
+    part to the soft ``mounts.*`` warnings used for mount-specific problems.
     """
 
     def test_mount_config_error_is_extension_error(self) -> None:
@@ -348,7 +348,7 @@ class TestParseMounts:
 
     def test_missing_dir_resolves_without_raising(self, tmp_path: Path) -> None:
         """A missing directory is *not* a config error: it resolves to an
-        absolute path and is reported as a ``mounts_missing_path`` warning
+        absolute path and is reported as a ``mounts.missing_path`` warning
         at mount time, so a build whose upstream bundle is absent (e.g. CI
         that has not run the Bazel build yet) can still proceed."""
         mounts = parse_mounts(

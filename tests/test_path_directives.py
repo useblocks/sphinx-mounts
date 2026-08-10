@@ -574,7 +574,7 @@ def test_path_check_warn_emits_warning_not_error(make_app, make_host_project, tm
     app = _build(make_app, host)  # must NOT raise
 
     assert "outside its bundle root" in app._warning.getvalue()
-    assert "mounts_path_escape" in app._warning.getvalue()
+    assert "mounts.path_escape" in app._warning.getvalue()
 
 
 def test_path_check_off_allows_escape(make_app, make_host_project, tmp_path):

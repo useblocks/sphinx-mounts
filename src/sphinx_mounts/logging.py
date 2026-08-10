@@ -1,22 +1,24 @@
 """Typed-warning helpers for sphinx-mounts.
 
-Every warning this extension emits carries a ``type`` that starts with
-``mounts_`` so users can identify it as coming from sphinx-mounts and
-selectively suppress it via Sphinx's ``suppress_warnings`` config:
+Every warning this extension emits carries a Sphinx warning ``type`` of
+``mounts`` with a per-problem ``subtype``, so the console shows
+``[mounts.<subtype>]`` and users can suppress at either granularity via
+Sphinx's ``suppress_warnings`` config:
 
 .. code-block:: python
 
    suppress_warnings = [
-       "mounts_docname_conflict",   # one specific problem
-       "mounts_mount_at_occupied",
+       "mounts",                    # suppress every sphinx-mounts warning
+       "mounts.docname_conflict",   # …or just this one problem
    ]
 
 Sphinx matches warning types exactly (``type``, ``type.*``, or
-``type.subtype``), so the plain ``mounts_<topic>`` tokens used here are
-suppressed by naming them verbatim. Non-suppressed warnings are counted
-by Sphinx and escalate to a failed build under ``sphinx-build -W``
-(``warningiserror``), which is how users turn "soft" mount problems into
-hard build failures when they want to.
+``type.subtype``), so ``type="mounts"`` with a ``subtype`` gives group
+suppression (``"mounts"`` silences all) a plain single-segment type
+would not. Non-suppressed warnings are counted by Sphinx and escalate to
+a failed build under ``sphinx-build -W`` (``warningiserror``), which is
+how users turn "soft" mount problems into hard build failures when they
+want to.
 
 Config *validation* errors (malformed TOML, wrong types, unknown keys)
 deliberately stay hard ``ExtensionError`` failures instead of warnings —
@@ -33,8 +35,8 @@ from sphinx import version_info
 if TYPE_CHECKING:
     from sphinx.util.logging import SphinxLoggerAdapter
 
-#: Warning topics known to sphinx-mounts. Keep sorted — adding a new
-#: topic should be a visible, reviewable diff.
+#: Warning subtypes known to sphinx-mounts. Keep sorted — adding a new
+#: subtype should be a visible, reviewable diff.
 WarningTopics = Literal[
     "attach_to_missing",
     "docname_conflict",
@@ -45,19 +47,9 @@ WarningTopics = Literal[
     "unknown_suffix",
 ]
 
-#: One-line description per topic; feeds the documentation.
-WARNING_TOPIC_DESCRIPTIONS: dict[WarningTopics, str] = {
-    "attach_to_missing": "attach_to references a docname that does not exist",
-    "docname_conflict": "a mount would shadow a docname already provided by "
-    "the host project or an earlier mount",
-    "missing_path": "a configured dir/files path does not exist on disk",
-    "mount_at_occupied": "strict_mount_at is set and the host already has a "
-    "directory at the mount point",
-    "path_escape": "a mounted doc references a file outside its bundle root",
-    "toctree_index": "toctree_index exceeds the number of toctrees in the "
-    "attach_to document",
-    "unknown_suffix": "a file-list entry has no extension registered in source_suffix",
-}
+#: Warning ``type`` shared by every sphinx-mounts warning. Combined with a
+#: ``subtype``, ``suppress_warnings = ["mounts"]`` silences all of them.
+WARNING_TYPE = "mounts"
 
 
 def log_warning(
@@ -69,10 +61,11 @@ def log_warning(
 ) -> None:
     """Emit a typed sphinx-mounts warning.
 
-    The full warning type is ``mounts_<topic>`` — the string users put
-    into ``suppress_warnings``. Sphinx < 8 does not display warning types
-    by default, so the type is appended to the message there to keep the
-    console output self-explanatory on all supported versions.
+    The warning type is ``mounts.<topic>`` — for ``topic``
+    ``"docname_conflict"`` that is ``mounts.docname_conflict``. Sphinx < 8
+    does not display warning types by default, so the type is appended to
+    the message there to keep the console output self-explanatory on all
+    supported versions.
 
     :param logger: The module logger to emit through.
     :param message: The warning text (already including the
@@ -81,7 +74,6 @@ def log_warning(
     :param location: Optional docname (or ``docname:lineno``) the warning
         belongs to.
     """
-    warning_type = f"mounts_{topic}"
     if version_info < (8,):
-        message = f"{message} [{warning_type}]"
-    logger.warning(message, type=warning_type, location=location)
+        message = f"{message} [{WARNING_TYPE}.{topic}]"
+    logger.warning(message, type=WARNING_TYPE, subtype=topic, location=location)
