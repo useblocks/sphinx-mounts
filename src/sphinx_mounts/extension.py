@@ -14,6 +14,7 @@ from sphinx.util import logging
 
 from sphinx_mounts import __version__
 from sphinx_mounts.config import MountConfig, load_mounts_from_toml, parse_mounts
+from sphinx_mounts.logging import log_warning
 from sphinx_mounts.mounter import _MountAwareProject, install_mount_aware_project
 
 logger = logging.getLogger(__name__)
@@ -104,8 +105,9 @@ def _on_doctree_read(app: Sphinx, doctree: nodes.document) -> None:
     file-list mount, *every* docname the mount produced is appended, in
     ``files`` order. If the host doc contains no toctree at all, a new
     one is added beneath the first section. If ``toctree_index`` exceeds
-    the number of toctrees in the doc, raise :class:`ExtensionError` —
-    silent misconfiguration would leave the mount unreferenced.
+    the number of toctrees in the doc, a ``mounts_toctree_index`` warning
+    is emitted and the mount is left unwired — the host doc is never
+    modified against the author's layout.
     """
     parsed: tuple[MountConfig, ...] = getattr(app, _CACHED_KEY, ())
     if not parsed:
@@ -127,6 +129,10 @@ def _on_doctree_read(app: Sphinx, doctree: nodes.document) -> None:
         target = _select_or_create_toctree(
             doctree, toctrees, docname, mount, entries[0]
         )
+        if target is None:
+            # toctree_index was out of range — warned and skipped, so the
+            # host doc stays untouched.
+            continue
         added: list[str] = []
         for entry in entries:
             if entry in target["includefiles"]:
@@ -166,14 +172,15 @@ def _select_or_create_toctree(
     docname: str,
     mount: MountConfig,
     seed_entry: str,
-) -> addnodes.toctree:
+) -> addnodes.toctree | None:
     """Return the toctree in ``doctree`` that ``mount`` should extend.
 
     If the doc has no toctree yet, build one (seeded with ``seed_entry``),
     attach it at the end of the first section, and register it in
     ``toctrees`` so later mounts targeting the same doc reuse it. Otherwise
-    return the toctree selected by ``mount.toctree_index``, raising
-    :class:`ExtensionError` when the index is out of range.
+    return the toctree selected by ``mount.toctree_index``. When the index
+    is out of range, emit a ``mounts_toctree_index`` warning and return
+    ``None`` — the mount is left unwired instead of failing the build.
     """
     if not toctrees:
         node = _build_toctree_node(docname, seed_entry)
@@ -185,9 +192,11 @@ def _select_or_create_toctree(
         msg = (
             f"sphinx-mounts: mount {mount_label} requested "
             f"toctree_index={mount.toctree_index} in host doc "
-            f"{docname!r}, but only {len(toctrees)} toctree(s) exist."
+            f"{docname!r}, but only {len(toctrees)} toctree(s) exist — "
+            f"the mount is not wired into any toctree."
         )
-        raise ExtensionError(msg)
+        log_warning(logger, msg, "toctree_index", location=docname)
+        return None
     return toctrees[mount.toctree_index]
 
 
@@ -202,13 +211,12 @@ def _on_check_consistency(app: Sphinx, env: Any) -> None:
             continue
         if mount.attach_to not in found:
             mount_label = "<root>" if mount.mount_at is None else repr(mount.mount_at)
-            logger.warning(
-                "sphinx-mounts: mount %s has attach_to=%r, but that "
-                "docname does not exist in the project — nothing was "
-                "extended.",
-                mount_label,
-                mount.attach_to,
+            msg = (
+                f"sphinx-mounts: mount {mount_label} has attach_to={mount.attach_to!r}, "
+                f"but that docname does not exist in the project — nothing "
+                f"was extended."
             )
+            log_warning(logger, msg, "attach_to_missing")
 
 
 def _on_check_path_confinement(app: Sphinx, env: Any) -> None:  # noqa: ARG001
@@ -249,7 +257,7 @@ def _on_check_path_confinement(app: Sphinx, env: Any) -> None:  # noqa: ARG001
             )
             if mode == "error":
                 raise ExtensionError(msg)
-            logger.warning("%s", msg)
+            log_warning(logger, msg, "path_escape")
 
 
 def _build_toctree_node(parent: str, entry: str) -> addnodes.toctree:

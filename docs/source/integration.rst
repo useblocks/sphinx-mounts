@@ -240,7 +240,8 @@ For each path in the ``files`` list:
 The file's parent directories are deliberately discarded — file-list
 mode is for cherry-picking individual documents, and a flat namespace
 under ``mount_at`` is what the user is asking for. Two files with the
-same basename would collide on docname and raise.
+same basename would collide on docname: the first is mounted, the
+second is skipped with a ``docname conflict`` warning.
 
 Worked examples, again with ``mount_at = "_generated/notes"``:
 
@@ -258,8 +259,9 @@ Worked examples, again with ``mount_at = "_generated/notes"``:
      - ``_generated/notes/intro``
 
 Unlike directory mode, a listed file with an extension that does not
-match ``source_suffix`` is **an error**, not a silent skip — the user
-asked for that file by name, so silently ignoring it would be wrong.
+match ``source_suffix`` is **skipped with a warning**, not silently
+ignored — the user asked for that file by name, so a silent skip
+would be wrong (see :ref:`warnings-and-errors`).
 
 Suffix handling
 ~~~~~~~~~~~~~~~

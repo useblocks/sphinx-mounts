@@ -303,21 +303,26 @@ def test_mount_at_omitted_places_bundle_at_root(
     assert not (host / "_generated").exists()
 
 
-def test_root_mount_shadowing_host_doc_raises(
+def test_root_mount_shadowing_host_doc_warns(
     make_app, make_host_project, bundle_simple
 ):
     """When a root-mounted bundle would shadow a host doc that already
-    exists at that docname, the existing collision check fires. The
-    error message must label the mount as ``<root>`` (not as the
-    string representation of None)."""
+    exists at that docname, the mount entry is skipped with a
+    ``mounts_docname_conflict`` warning and the host doc wins. The warning
+    must label the mount as ``<root>`` (not as the string representation
+    of None)."""
     host = make_host_project()
     # host_project's index.rst exists; bundle_simple ships an index.rst
     # too. Without a prefix the two docnames collide at "index".
     write_ubproject_toml(host, [{"dir": str(bundle_simple)}])
 
-    with pytest.raises(Exception, match=r"docname conflict.*mount <root>"):
-        app = make_app(srcdir=host, freshenv=True)
-        app.build()
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "docname conflict" in warnings
+    assert "mount <root>" in warnings
+    assert "mounts_docname_conflict" in warnings
 
 
 def test_root_mount_with_attach_to_wires_bare_entry_doc(
@@ -856,10 +861,11 @@ def test_attach_each_creates_toctree_when_absent(
     assert "_generated/api/details" in includefiles
 
 
-def test_mount_files_unknown_suffix_raises(make_app, make_host_project, tmp_path):
-    """A listed file whose extension is not in source_suffix is an error —
-    the user explicitly asked for it to be mounted, so silently skipping
-    would be the wrong behaviour."""
+def test_mount_files_unknown_suffix_warns(make_app, make_host_project, tmp_path):
+    """A listed file whose extension is not in source_suffix is skipped
+    with a ``mounts_unknown_suffix`` warning. The user explicitly asked
+    for it to be mounted, so a silent skip would be wrong — but the rest
+    of the build can still proceed."""
     host = make_host_project()
     odd = tmp_path / "notes.adoc"
     odd.write_text("= AsciiDoc not configured\n", encoding="utf-8")
@@ -868,12 +874,17 @@ def test_mount_files_unknown_suffix_raises(make_app, make_host_project, tmp_path
         [{"files": [str(odd)], "mount_at": "_generated/api"}],
     )
 
-    with pytest.raises(Exception, match="source_suffix"):
-        app = make_app(srcdir=host, freshenv=True)
-        app.build()
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "source_suffix" in warnings
+    assert "mounts_unknown_suffix" in warnings
 
 
-def test_mount_files_missing_file_raises(make_app, make_host_project, tmp_path):
+def test_mount_files_missing_file_warns(make_app, make_host_project, tmp_path):
+    """A listed file that does not exist is skipped with a
+    ``mounts_missing_path`` warning instead of failing the build."""
     host = make_host_project()
     write_ubproject_toml(
         host,
@@ -885,11 +896,19 @@ def test_mount_files_missing_file_raises(make_app, make_host_project, tmp_path):
         ],
     )
 
-    with pytest.raises(Exception, match="does not exist or is not a file"):
-        make_app(srcdir=host, freshenv=True)
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "does not exist" in warnings
+    assert "mounts_missing_path" in warnings
 
 
-def test_missing_mount_dir_raises(make_app, make_host_project, tmp_path):
+def test_missing_mount_dir_warns(make_app, make_host_project, tmp_path):
+    """A configured mount dir that does not exist is skipped with a
+    ``mounts_missing_path`` warning and the host project still builds —
+    the resilience story for builds whose upstream bundle is absent (CI
+    has not run the Bazel build yet)."""
     host = make_host_project()
     missing = tmp_path / "does_not_exist"
     write_ubproject_toml(
@@ -897,10 +916,13 @@ def test_missing_mount_dir_raises(make_app, make_host_project, tmp_path):
         [{"dir": str(missing), "mount_at": "_generated/api-foo"}],
     )
 
-    # Sphinx wraps handler exceptions in ExtensionError; match on the
-    # underlying message instead of the exception type.
-    with pytest.raises(Exception, match="does not exist"):
-        make_app(srcdir=host, freshenv=True)
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "does not exist" in warnings
+    assert "mounts_missing_path" in warnings
+    assert (Path(app.outdir) / "index.html").exists()
 
 
 def test_exclude_filter_bundle_files(make_app, make_host_project, bundle_simple):
@@ -923,8 +945,12 @@ def test_exclude_filter_bundle_files(make_app, make_host_project, bundle_simple)
     assert not (outdir / "_generated/api-foo/details.html").exists()
 
 
-def test_docname_conflict_raises(make_app, make_host_project, bundle_simple, tmp_path):
-    """Two mounts producing the same docname must be rejected."""
+def test_docname_conflict_warns_and_first_mount_wins(
+    make_app, make_host_project, bundle_simple, tmp_path
+):
+    """Two mounts producing the same docname: the first mount wins, the
+    second is skipped with a ``mounts_docname_conflict`` warning. The
+    conflict is detected during discover(), which runs as part of build()."""
     host = make_host_project()
     # Duplicate the bundle at a second source dir; both mount at the same
     # prefix so docnames collide.
@@ -938,19 +964,68 @@ def test_docname_conflict_raises(make_app, make_host_project, bundle_simple, tmp
             {"dir": str(second), "mount_at": "_generated/clash"},
         ],
     )
+    _replace_index_toctree(host, "_generated/clash/index")
 
-    # Conflict is raised during discover(), which runs as part of build();
-    # Sphinx wraps it in ExtensionError.
-    with pytest.raises(Exception, match="docname conflict"):
-        app = make_app(srcdir=host, freshenv=True)
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "docname conflict" in warnings
+    assert "mounts_docname_conflict" in warnings
+    # bundle_simple (the first mount) provided the docname.
+    html = (Path(app.outdir) / "_generated/clash/index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "API Foo" in html
+    assert "Dup" not in html
+
+
+def test_docname_conflict_warning_is_suppressible(
+    make_app, make_host_project, bundle_simple
+):
+    """A mount-specific problem can be silenced via Sphinx's
+    ``suppress_warnings`` — the typed ``mounts_*`` warning is the handle
+    users opt out of."""
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle_simple)}])
+    conf = host / "conf.py"
+    conf.write_text(
+        conf.read_text(encoding="utf-8")
+        + '\nsuppress_warnings = ["mounts_docname_conflict"]\n',
+        encoding="utf-8",
+    )
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    assert "docname conflict" not in app._warning.getvalue()
+
+
+def test_docname_conflict_fails_under_warningiserror(
+    make_app, make_host_project, bundle_simple
+):
+    """Under ``sphinx-build -W`` (warningiserror) a mount warning fails
+    the build — the escalation hook for users who want mount problems to
+    be hard failures. Sphinx < 9 raises ``SphinxWarning`` immediately;
+    Sphinx 9 sets a non-zero status code at the end of the build."""
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle_simple)}])
+
+    app = make_app(srcdir=host, freshenv=True, warningiserror=True)
+    try:
         app.build()
+    except Exception as exc:
+        assert "docname conflict" in str(exc)
+    else:
+        assert app.statuscode != 0
 
 
-def test_strict_mount_at_rejects_preexisting_host_dir(
+def test_strict_mount_at_warns_on_preexisting_host_dir(
     make_app, make_host_project, bundle_simple
 ):
     """With ``strict_mount_at = true``, a host directory at the mount
-    point is a misconfiguration even when no concrete docname collides.
+    point is reported as a ``mounts_mount_at_occupied`` warning instead of
+    failing the build; the per-docname collision check remains the gate.
     """
     host = make_host_project()
     (host / "_generated" / "api-foo").mkdir(parents=True)
@@ -964,10 +1039,14 @@ def test_strict_mount_at_rejects_preexisting_host_dir(
             }
         ],
     )
+    _replace_index_toctree(host, "_generated/api-foo/index")
 
-    with pytest.raises(Exception, match=r"strict_mount_at.*_generated/api-foo"):
-        app = make_app(srcdir=host, freshenv=True)
-        app.build()
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "strict_mount_at" in warnings
+    assert "mounts_mount_at_occupied" in warnings
 
 
 def test_strict_mount_at_passes_when_no_host_dir(
@@ -1014,11 +1093,12 @@ def test_strict_mount_at_default_permissive_allows_host_dir(
     assert (outdir / "_generated" / "api-foo" / "details.html").exists()
 
 
-def test_strict_mount_at_rejects_preexisting_host_dir_in_files_mode(
+def test_strict_mount_at_warns_on_preexisting_host_dir_in_files_mode(
     make_app, make_host_project, bundle_simple
 ):
     """The strict check is mode-agnostic — file-list mounts honour it
-    the same way directory mounts do."""
+    the same way directory mounts do, and the violation is a
+    ``mounts_mount_at_occupied`` warning."""
     host = make_host_project()
     (host / "_generated" / "release-notes").mkdir(parents=True)
     write_ubproject_toml(
@@ -1032,9 +1112,13 @@ def test_strict_mount_at_rejects_preexisting_host_dir_in_files_mode(
         ],
     )
 
-    with pytest.raises(Exception, match=r"strict_mount_at.*_generated/release-notes"):
-        app = make_app(srcdir=host, freshenv=True)
-        app.build()
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "strict_mount_at" in warnings
+    assert "_generated/release-notes" in warnings
+    assert "mounts_mount_at_occupied" in warnings
 
 
 def test_toml_overrides_conf_py_mounts(
@@ -1233,10 +1317,12 @@ def test_attach_to_targets_specific_toctree_by_index(
     )
 
 
-def test_attach_to_index_out_of_range_raises(
+def test_attach_to_index_out_of_range_warns_and_skips(
     make_app, make_host_project, bundle_simple
 ):
-    """Asking for a toctree that doesn't exist must fail loudly."""
+    """Asking for a toctree that doesn't exist emits a
+    ``mounts_toctree_index`` warning and leaves the host doc untouched
+    instead of failing the build."""
     host = make_host_project()
     _set_index_rst(host, "Host\n====\n\n.. toctree::\n   :maxdepth: 1\n")
     write_ubproject_toml(
@@ -1251,8 +1337,17 @@ def test_attach_to_index_out_of_range_raises(
         ],
     )
 
-    with pytest.raises(Exception, match="only 1 toctree"):
-        _build(make_app, host)
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "toctree_index" in warnings
+    assert "mounts_toctree_index" in warnings
+    # The mount entry was not wired into the host toctree.
+    doctree = app.env.get_doctree("index")
+    toctrees = list(doctree.findall(addnodes.toctree))
+    assert len(toctrees) == 1
+    assert "_generated/api-foo/index" not in toctrees[0]["includefiles"]
 
 
 def test_attach_to_creates_toctree_when_absent(

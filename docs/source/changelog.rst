@@ -3,6 +3,28 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+- Expected configuration problems are now reported through Sphinx's
+  warning/error machinery instead of as ``ValueError`` tracebacks (`issue
+  #25 <https://github.com/useblocks/sphinx-mounts/issues/25>`__):
+
+  - **Hard errors** (unreadable configuration — malformed TOML, wrong
+    types, unknown keys) abort the build as a concise ``Extension error``
+    message. They subclass :class:`sphinx.errors.ExtensionError` and are
+    deliberately not suppressible: sphinx-mounts cannot proceed at all.
+  - **Mount-specific problems** are warnings: a ``docname conflict``
+    skips the colliding entry (first provider wins), a missing
+    ``dir``/``files`` path skips that mount, a file with an unregistered
+    suffix is skipped, ``strict_mount_at`` violations and out-of-range
+    ``toctree_index`` no longer fail the build, and the existing
+    ``attach_to``/``path_check`` warnings are now typed too. Each warning
+    carries a ``mounts_<topic>`` type, so users can suppress it via
+    :confval:`suppress_warnings <sphinx:suppress_warnings>` and escalate
+    it to a build failure with ``sphinx-build -W``. See
+    :ref:`warnings-and-errors`.
+
 .. _`release:0.1.3`:
 
 0.1.3
