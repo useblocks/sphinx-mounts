@@ -24,7 +24,7 @@ import zlib
 
 import pytest
 
-from tests.conftest import write_ubproject_toml
+from tests.conftest import count_mount_warnings, write_ubproject_toml
 
 if TYPE_CHECKING:
     from sphinx.testing.util import SphinxTestApp
@@ -575,6 +575,7 @@ def test_path_check_warn_emits_warning_not_error(make_app, make_host_project, tm
 
     assert "outside its bundle root" in app._warning.getvalue()
     assert "mounts.path_escape" in app._warning.getvalue()
+    assert count_mount_warnings(app) == 1
 
 
 def test_path_check_off_allows_escape(make_app, make_host_project, tmp_path):

@@ -27,7 +27,12 @@ import sphinx
 from sphinx import addnodes
 from sphinx.testing.fixtures import SharedResult  # noqa: F401  (registers fixture)
 
-from tests.conftest import patch_conf_py, write_ubproject_toml
+from tests.conftest import (
+    count_mount_warnings,
+    count_warnings,
+    patch_conf_py,
+    write_ubproject_toml,
+)
 
 if TYPE_CHECKING:
     pass
@@ -323,6 +328,7 @@ def test_root_mount_shadowing_host_doc_warns(
     assert "docname conflict" in warnings
     assert "mount <root>" in warnings
     assert "mounts.docname_conflict" in warnings
+    assert count_mount_warnings(app) == 1
 
 
 def test_root_mount_with_attach_to_wires_bare_entry_doc(
@@ -880,6 +886,7 @@ def test_mount_files_unknown_suffix_warns(make_app, make_host_project, tmp_path)
     warnings = app._warning.getvalue()
     assert "source_suffix" in warnings
     assert "mounts.unknown_suffix" in warnings
+    assert count_mount_warnings(app) == 1
 
 
 def test_mount_files_missing_file_warns(make_app, make_host_project, tmp_path):
@@ -902,6 +909,7 @@ def test_mount_files_missing_file_warns(make_app, make_host_project, tmp_path):
     warnings = app._warning.getvalue()
     assert "does not exist" in warnings
     assert "mounts.missing_path" in warnings
+    assert count_mount_warnings(app) == 1
 
 
 def test_missing_mount_dir_warns(make_app, make_host_project, tmp_path):
@@ -923,6 +931,7 @@ def test_missing_mount_dir_warns(make_app, make_host_project, tmp_path):
     assert "does not exist" in warnings
     assert "mounts.missing_path" in warnings
     assert (Path(app.outdir) / "index.html").exists()
+    assert count_mount_warnings(app) == 1
 
 
 def test_missing_mount_dir_with_attach_to_does_not_wire_dangling_ref(
@@ -956,6 +965,8 @@ def test_missing_mount_dir_with_attach_to_does_not_wire_dangling_ref(
     assert all("_generated/api-foo/index" not in t["includefiles"] for t in toctrees)
     warnings = app._warning.getvalue()
     assert "toc.not_readable" not in warnings
+    assert count_warnings(app) == 1  # only the mounts.missing_path warning
+    assert count_mount_warnings(app) == 1
 
 
 def test_exclude_filter_bundle_files(make_app, make_host_project, bundle_simple):
@@ -1011,6 +1022,8 @@ def test_docname_conflict_warns_and_first_mount_wins(
     )
     assert "API Foo" in html
     assert "Dup" not in html
+    assert count_warnings(app) == 1  # only the docname conflict
+    assert count_mount_warnings(app) == 1
 
 
 def test_docname_conflict_warning_is_suppressible(
@@ -1032,6 +1045,7 @@ def test_docname_conflict_warning_is_suppressible(
     app.build()
 
     assert "docname conflict" not in app._warning.getvalue()
+    assert count_mount_warnings(app) == 0
 
 
 def test_docname_conflict_warning_group_suppressible(
@@ -1052,6 +1066,7 @@ def test_docname_conflict_warning_group_suppressible(
     app.build()
 
     assert "docname conflict" not in app._warning.getvalue()
+    assert count_mount_warnings(app) == 0
 
 
 def test_docname_conflict_fails_under_warningiserror(
@@ -1098,6 +1113,8 @@ def test_docname_conflict_fails_under_warningiserror(
         assert "docname conflict" in warnings
         assert "toc.not_readable" not in warnings
         assert "toc.not_included" not in warnings
+        assert count_warnings(app) == 1  # only the docname conflict
+        assert count_mount_warnings(app) == 1
 
 
 def test_strict_mount_at_warns_on_preexisting_host_dir(
@@ -1127,6 +1144,8 @@ def test_strict_mount_at_warns_on_preexisting_host_dir(
     warnings = app._warning.getvalue()
     assert "strict_mount_at" in warnings
     assert "mounts.mount_at_occupied" in warnings
+    assert count_warnings(app) == 1  # only the mount_at_occupied warning
+    assert count_mount_warnings(app) == 1
 
 
 def test_strict_mount_at_passes_when_no_host_dir(
@@ -1199,6 +1218,7 @@ def test_strict_mount_at_warns_on_preexisting_host_dir_in_files_mode(
     assert "strict_mount_at" in warnings
     assert "_generated/release-notes" in warnings
     assert "mounts.mount_at_occupied" in warnings
+    assert count_mount_warnings(app) == 1
 
 
 def test_toml_overrides_conf_py_mounts(
@@ -1423,6 +1443,7 @@ def test_attach_to_index_out_of_range_warns_and_skips(
     warnings = app._warning.getvalue()
     assert "toctree_index" in warnings
     assert "mounts.toctree_index" in warnings
+    assert count_mount_warnings(app) == 1
     # The mount entry was not wired into the host toctree.
     doctree = app.env.get_doctree("index")
     toctrees = list(doctree.findall(addnodes.toctree))
