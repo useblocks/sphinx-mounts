@@ -46,6 +46,15 @@ Unreleased
     it to a build failure with ``sphinx-build -W``. See
     :ref:`warnings-and-errors`.
 
+- The example project (``tests/example/docs``) gained a **warning
+  showcase**: its ``ubproject.toml`` ends with one commented-out
+  ``[[mounts]]`` block per warning the extension can emit, each with a
+  comment explaining why it fires, backed by the demo bundles in
+  ``tests/example/warnings/bundles/``. Uncomment a block and rebuild to
+  see that warning in isolation; with all blocks commented the example
+  builds warning-clean. See the "Warning showcase" section in
+  ``tests/example/docs/ubproject.toml``.
+
 .. _`release:0.1.3`:
 
 0.1.3
