@@ -273,6 +273,21 @@ class MountConfig:
         )
 
 
+def mount_label(mount: MountConfig, index: int) -> str:
+    """Human-readable identifier for a mount, used in warning messages.
+
+    Names the mount's position in the ``mounts`` config list plus its
+    source path, so a warning is actionable without counting config
+    blocks: ``mounts[0] (dir=/abs/path)`` in directory mode, or
+    ``mounts[1] (files=/a.rst, /b.rst)`` in file-list mode.
+    """
+    if mount.dir is not None:
+        source = f"dir={mount.dir}"
+    else:
+        source = f"files={', '.join(map(str, mount.files or ()))}"
+    return f"mounts[{index}] ({source})"
+
+
 def _coerce_path(raw: Any) -> Path:
     """Accept Path or str; reject anything else."""
     if isinstance(raw, Path):

@@ -323,9 +323,10 @@ def test_root_mount_shadowing_host_doc_warns(
     """When a root-mounted bundle would shadow a host doc that already
     exists at that docname, the WHOLE mount is skipped with a single
     ``mounts.docname_conflict`` warning and the host doc wins. The warning
-    must label the mount as ``<root>`` (not as the string representation
-    of None). Skipping the whole mount — not just the colliding file —
-    leaves the host project completely untouched (no orphaned siblings)."""
+    must identify the mount by its config index and source path — not by a
+    bare ``<root>`` object representation. Skipping the whole mount — not
+    just the colliding file — leaves the host project completely
+    untouched (no orphaned siblings)."""
     host = make_host_project()
     # host_project's index.rst exists; bundle_simple ships an index.rst
     # too. Without a prefix the two docnames collide at "index".
@@ -341,7 +342,8 @@ def test_root_mount_shadowing_host_doc_warns(
 
     warnings = app._warning.getvalue()
     assert "docname conflict" in warnings
-    assert "mount <root>" in warnings
+    assert "mounts[0]" in warnings
+    assert f"dir={bundle_simple}" in warnings
     assert "mounts.docname_conflict" in warnings
     # The whole mount was removed: no sibling docs were mounted.
     assert not (Path(app.outdir) / "intro.html").exists()

@@ -35,8 +35,10 @@ Unreleased
     ``toc.circular`` toctree noise), proving the host was left untouched.
     An out-of-range ``toctree_index`` skips only the toctree wiring, and
     the existing ``attach_to``/``path_check`` warnings are typed too. Each
-    warning carries a ``mounts.<subtype>`` type, so users can suppress one
-    problem (``"mounts.docname_conflict"``) or all of them at once
+    warning names the offending mount by its config index and source path
+    (e.g. ``mounts[0] (dir=/abs/path/to/bundle)``) and carries a
+    ``mounts.<subtype>`` type, so users can suppress one problem
+    (``"mounts.docname_conflict"``) or all of them at once
     (``"mounts"``) via
     :confval:`suppress_warnings <sphinx:suppress_warnings>` and escalate
     it to a build failure with ``sphinx-build -W``. See
