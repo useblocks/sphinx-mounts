@@ -43,8 +43,8 @@ def _read_html(outdir: Path, docname: str) -> str:
     return (outdir / f"{docname}.html").read_text(encoding="utf-8")
 
 
-def _build(make_app, host_dir: Path) -> Path:
-    """Build the host project and return its ``outdir``.
+def _build_clean(make_app, host_dir: Path) -> Path:
+    """Build the host project expecting a warning-free build and return its ``outdir``.
 
     The strict warning contract: a build that is expected to succeed must
     emit **zero** Sphinx warnings of any kind — if sphinx-mounts handled
@@ -70,7 +70,7 @@ def test_basic_mount_makes_external_files_readable(
         [{"dir": str(bundle_simple), "mount_at": "_generated/api-foo"}],
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     html = _read_html(outdir, "_generated/api-foo/details")
     assert "BUNDLE_SIMPLE_DETAILS_MARKER" in html
@@ -102,7 +102,7 @@ def test_bundle_internal_toctree_is_navigable_from_host(
     )
     _replace_index_toctree(host, "_generated/api-foo/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # 1) The host's toctree (maxdepth=2) nests the bundle's siblings
     #    transitively, so the host's index.html already links to all
@@ -149,7 +149,7 @@ def test_internal_doc_reference_within_bundle_resolves(
         [{"dir": str(bundle_simple), "mount_at": "_generated/api-foo"}],
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # intro.rst has `:doc:\`details\`` which should resolve to the sibling
     # mounted doc and produce a hyperlink in the HTML.
@@ -165,7 +165,7 @@ def test_nested_subdirectory_docnames(make_app, make_host_project, bundle_nested
     )
     _replace_index_toctree(host, "_generated/nested/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     page_a = _read_html(outdir, "_generated/nested/subdir/page_a")
     page_b = _read_html(outdir, "_generated/nested/subdir/page_b")
@@ -213,7 +213,7 @@ def test_rst_host_mounts_rst_and_markdown_bundles_together(
         encoding="utf-8",
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # 1) Host's own RST content renders.
     host_html = (outdir / "index.html").read_text(encoding="utf-8")
@@ -259,7 +259,7 @@ def test_markdown_mount_with_myst_parser(make_app, make_host_project, bundle_mar
     )
     _replace_index_toctree(host, "_generated/md/index", "_generated/md/page")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     idx = _read_html(outdir, "_generated/md/index")
     page = _read_html(outdir, "_generated/md/page")
@@ -284,7 +284,7 @@ def test_two_mounts_coexist(make_app, make_host_project, bundle_simple, bundle_n
         "_generated/api-bar/index",
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     foo = _read_html(outdir, "_generated/api-foo/details")
     bar = _read_html(outdir, "_generated/api-bar/subdir/page_a")
@@ -306,7 +306,7 @@ def test_mount_at_omitted_places_bundle_at_root(
     # toctree (no prefix, because the mount is at root).
     _replace_index_toctree(host, "intro", "details")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # Bundle files render at the top level, without any prefix.
     assert (outdir / "intro.html").exists()
@@ -377,7 +377,7 @@ def test_root_mount_with_attach_to_wires_bare_entry_doc(
         ],
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # The mount produced a bare docname.
     assert (outdir / "tutorial.html").exists()
@@ -448,7 +448,7 @@ def test_directory_mount_carries_image_assets(make_app, make_host_project, tmp_p
     write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_generated/m"}])
     _replace_index_toctree(host, "_generated/m/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # Both images land in Sphinx's _images/ output dir. The names may
     # be deduplicated/suffixed by Sphinx if collisions occur, so check
@@ -496,7 +496,7 @@ def test_markdown_mount_carries_image_assets(make_app, make_host_project, tmp_pa
     write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_generated/m"}])
     _replace_index_toctree(host, "_generated/m/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     images_dir = outdir / "_images"
     assert images_dir.is_dir()
@@ -562,7 +562,7 @@ def test_mounted_bundle_links_html_extra_path_report(
     write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_generated/m"}])
     _replace_index_toctree(host, "_generated/m/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # 1) The report was copied verbatim into the OUTPUT → self-contained.
     assert (outdir / "coverage" / "index.html").exists()
@@ -609,7 +609,7 @@ def test_include_allowlist_restricts_walk(make_app, make_host_project, tmp_path)
     )
     _replace_index_toctree(host, "_generated/m/public")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     assert (outdir / "_generated" / "m" / "public.html").exists()
     assert not (outdir / "_generated" / "m" / "internal.html").exists()
@@ -643,7 +643,7 @@ def test_directory_mount_can_disable_gitignore(make_app, make_host_project, tmp_
     )
     _replace_index_toctree(host, "_generated/m/kept", "_generated/m/release-notes")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # Both files render — the gitignore rule is suppressed.
     assert (outdir / "_generated" / "m" / "kept.html").exists()
@@ -683,7 +683,7 @@ def test_directory_mount_respects_in_bundle_gitignore(
     )
     _replace_index_toctree(host, "_generated/api/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # Survivor renders.
     assert (outdir / "_generated/api/keep.html").exists()
@@ -716,7 +716,7 @@ def test_directory_mount_ignores_parent_gitignore(
     )
     _replace_index_toctree(host, "_generated/api/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # The generated doc must render despite workspace/.gitignore
     # excluding "bin/" — the walker only honours gitignore inside the
@@ -747,7 +747,7 @@ def test_mount_single_file_via_files(make_app, make_host_project, tmp_path):
     )
     _replace_index_toctree(host, "_generated/api/single")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     html = _read_html(outdir, "_generated/api/single")
     assert "SINGLE_FILE_MARKER" in html
@@ -775,7 +775,7 @@ def test_mount_multiple_files_via_files(make_app, make_host_project, bundle_simp
     )
     _replace_index_toctree(host, "_generated/api/intro", "_generated/api/details")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     intro = _read_html(outdir, "_generated/api/intro")
     details = _read_html(outdir, "_generated/api/details")
@@ -806,7 +806,7 @@ def test_mount_files_with_attach_to_wires_entry_doc(
         ],
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # The host toctree should now contain the wired-up entry doc.
     index_html = (outdir / "index.html").read_text(encoding="utf-8")
@@ -1029,7 +1029,7 @@ def test_exclude_filter_bundle_files(make_app, make_host_project, tmp_path):
     )
     _replace_index_toctree(host, "_generated/api-foo/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     assert (outdir / "_generated/api-foo/index.html").exists()
     assert (outdir / "_generated/api-foo/intro.html").exists()
@@ -1225,7 +1225,7 @@ def test_strict_mount_at_passes_when_no_host_dir(
         ],
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
     assert (outdir / "_generated" / "api-foo" / "details.html").exists()
 
 
@@ -1247,7 +1247,7 @@ def test_strict_mount_at_default_permissive_allows_host_dir(
         [{"dir": str(bundle_simple), "mount_at": "_generated/api-foo"}],
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
     assert (outdir / "_generated" / "api-foo" / "details.html").exists()
 
 
@@ -1299,7 +1299,7 @@ def test_toml_overrides_conf_py_mounts(
     )
     _replace_index_toctree(host, "_generated/from-toml/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     assert (outdir / "_generated/from-toml/details.html").exists()
     assert not (outdir / "_generated/from-py/index.html").exists()
@@ -1338,7 +1338,7 @@ def test_toml_in_subdir_anchors_paths_to_toml_directory(
         encoding="utf-8",
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     # The bundle's docs rendered, proving the relative path resolved
     # against the TOML's directory (configs/), not against confdir.
@@ -1360,7 +1360,7 @@ def test_custom_toml_path(make_app, make_host_project, bundle_simple):
         encoding="utf-8",
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     assert (outdir / "_generated/api-foo/details.html").exists()
 
@@ -1378,7 +1378,7 @@ def test_conf_py_mounts_used_when_no_toml(make_app, make_host_project, bundle_si
     # Ensure no ubproject.toml exists in confdir.
     assert not (host / "ubproject.toml").exists()
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     assert (outdir / "_generated/api-foo/details.html").exists()
 
@@ -1402,7 +1402,7 @@ def test_mounts_from_toml_disabled_with_none(
     )
     _replace_index_toctree(host, "_generated/from-py/index")
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     assert (outdir / "_generated/from-py/details.html").exists()
     assert not (outdir / "_generated/ignored/details.html").exists()
@@ -1426,7 +1426,7 @@ def test_attach_to_extends_existing_toctree(make_app, make_host_project, bundle_
         ],
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     assert (outdir / "_generated/api-foo/index.html").exists()
     index_html = (outdir / "index.html").read_text(encoding="utf-8")
@@ -1541,7 +1541,7 @@ def test_attach_to_creates_toctree_when_absent(
         ],
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     assert (outdir / "_generated/api-foo/index.html").exists()
     index_html = (outdir / "index.html").read_text(encoding="utf-8")
@@ -1621,7 +1621,7 @@ def test_attach_to_with_custom_entry_doc(make_app, make_host_project, bundle_sim
         ],
     )
 
-    outdir = _build(make_app, host)
+    outdir = _build_clean(make_app, host)
 
     index_html = (outdir / "index.html").read_text(encoding="utf-8")
     assert "_generated/api-foo/intro.html" in index_html
