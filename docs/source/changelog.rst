@@ -12,9 +12,11 @@ Unreleased
    outright — a ``docname conflict``, a ``strict_mount_at`` violation, an
    out-of-range ``toctree_index``, a missing ``dir``/``files`` path, or a
    file with an unrecognised suffix — are now **warnings**. The affected
-   mount/file is skipped and the build continues. To keep treating any of
-   them as a hard failure, build with ``sphinx-build -W`` (warnings as
-   errors).
+   **whole mount** is skipped — nothing of it is mounted, so the host
+   project stays completely untouched (no partial mounts, no orphaned
+   docs, no dangling toctree references) — and the build continues. To
+   keep treating any of them as a hard failure, build with
+   ``sphinx-build -W`` (warnings as errors).
 
 - Expected configuration problems are now reported through Sphinx's
   warning/error machinery instead of as ``ValueError`` tracebacks (`issue
@@ -25,14 +27,16 @@ Unreleased
     by :class:`sphinx.errors.ExtensionError` (attributed to this extension
     via its ``modname``). They are deliberately not suppressible:
     sphinx-mounts cannot proceed at all.
-  - **Mount-specific problems** are warnings: a ``docname conflict``
-    skips the colliding entry (first provider wins), a missing
-    ``dir``/``files`` path skips that mount, a file with an unregistered
-    suffix is skipped, ``strict_mount_at`` violations and out-of-range
-    ``toctree_index`` no longer fail the build, and the existing
-    ``attach_to``/``path_check`` warnings are now typed too. Each warning
-    carries a ``mounts.<subtype>`` type, so users can suppress one problem
-    (``"mounts.docname_conflict"``) or all of them at once
+  - **Mount-specific problems** are warnings and each skips the **whole
+    mount**: a ``docname conflict``, a missing ``dir``/``files`` path, a
+    file with an unregistered suffix, and a ``strict_mount_at`` violation
+    all drop the entire mount with exactly one warning — the build then
+    emits *no* further warnings (no ``toc.not_included`` orphans, no
+    ``toc.circular`` toctree noise), proving the host was left untouched.
+    An out-of-range ``toctree_index`` skips only the toctree wiring, and
+    the existing ``attach_to``/``path_check`` warnings are typed too. Each
+    warning carries a ``mounts.<subtype>`` type, so users can suppress one
+    problem (``"mounts.docname_conflict"``) or all of them at once
     (``"mounts"``) via
     :confval:`suppress_warnings <sphinx:suppress_warnings>` and escalate
     it to a build failure with ``sphinx-build -W``. See

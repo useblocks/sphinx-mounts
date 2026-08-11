@@ -119,16 +119,19 @@ def _on_doctree_read(app: Sphinx, doctree: nodes.document) -> None:
 
     project = getattr(app.env, "project", None)
     mount_docnames: dict[int, list[str]] = getattr(project, "_mount_entry_docnames", {})
-    project_docnames: set[str] | None = getattr(project, "docnames", None)
     toctrees: list[addnodes.toctree] = list(doctree.findall(addnodes.toctree))
 
     for index, mount in targets:
         entries = _mount_toctree_entries(mount, index, mount_docnames)
-        # Gate on project membership: a mount that produced no docnames
-        # (missing bundle, skipped/conflicted entry) must not inject a
-        # dangling, non-suppressible ``toc.not_readable`` reference.
-        if project_docnames is not None:
-            entries = [e for e in entries if e in project_docnames]
+        # Gate on what THIS mount actually produced: a mount that was
+        # skipped entirely (missing bundle, docname conflict, strict
+        # mount_at violation) or whose entry doc is not among its files
+        # must not inject a reference into the host toctree — a dangling
+        # entry would be an un-suppressible ``toc.not_readable`` /
+        # ``toc.circular`` warning that modifies the host project despite
+        # the problem.
+        produced = set(mount_docnames.get(index, []))
+        entries = [e for e in entries if e in produced]
         if not entries:
             continue
         target = _select_or_create_toctree(

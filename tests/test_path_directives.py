@@ -24,7 +24,7 @@ import zlib
 
 import pytest
 
-from tests.conftest import count_mount_warnings, write_ubproject_toml
+from tests.conftest import count_mount_warnings, count_warnings, write_ubproject_toml
 
 if TYPE_CHECKING:
     from sphinx.testing.util import SphinxTestApp
@@ -575,6 +575,7 @@ def test_path_check_warn_emits_warning_not_error(make_app, make_host_project, tm
 
     assert "outside its bundle root" in app._warning.getvalue()
     assert "mounts.path_escape" in app._warning.getvalue()
+    assert count_warnings(app) == 1  # only the path_escape warning
     assert count_mount_warnings(app) == 1
 
 
@@ -590,6 +591,7 @@ def test_path_check_off_allows_escape(make_app, make_host_project, tmp_path):
     app = _build(make_app, host)
 
     assert "outside its bundle root" not in app._warning.getvalue()
+    assert count_warnings(app) == 0
     # The leaked host file content really did render (documents the leak).
     html = (Path(app.outdir) / "_g" / "api" / "index.html").read_text(encoding="utf-8")
     assert "HOST_SECRET" in html
@@ -912,6 +914,7 @@ def test_changed_include_target_rereads_mounted_doc(
 
     app = make_app(srcdir=host, freshenv=True)
     app.build()
+    assert count_warnings(app) == 0
 
     # Precondition (teeth): the directive recorded its target as a dependency
     # of the mounted doc, pointing at the external file. Without this, a later
@@ -929,6 +932,7 @@ def test_changed_include_target_rereads_mounted_doc(
     _bump_mtime(bundle / target_name)
 
     app.build()
+    assert count_warnings(app) == 0
     read = _docs_read_in_log(app._status.getvalue()[offset:])
 
     assert "_generated/m/index" in read, (
