@@ -767,6 +767,33 @@ def _write_payload(path: Path, content: str | bytes) -> None:
         path.write_text(content, encoding="utf-8")
 
 
+def _renderer_missing(directive_rst: str) -> bool:
+    """Whether a diagram directive will warn because its external renderer
+    binary is not installed (``dot`` for graphviz, ``plantuml``/``java`` for
+    uml). Sphinx emits a warning for the missing binary — environmental
+    noise unrelated to sphinx-mounts, so the strict zero-warning assertion
+    must not apply to those cases (the pytest CI matrix does not install
+    the renderers)."""
+    if "graphviz" in directive_rst:
+        return shutil.which("dot") is None
+    if "uml" in directive_rst:
+        return shutil.which("plantuml") is None or shutil.which("java") is None
+    return False
+
+
+def _assert_clean_build(app, directive_rst: str) -> None:
+    """Enforce the strict warning contract for a successful build.
+
+    sphinx-mounts must never warn here (``count_mount_warnings == 0``), and
+    no Sphinx warning of any kind may appear unless an external diagram
+    renderer binary is missing from the environment (see
+    :func:`_renderer_missing`).
+    """
+    assert count_mount_warnings(app) == 0, app._warning.getvalue()
+    if not _renderer_missing(directive_rst):
+        assert count_warnings(app) == 0, app._warning.getvalue()
+
+
 _RED_PNG = _tiny_png((0xFF, 0x00, 0x00))
 _GREEN_PNG = _tiny_png((0x00, 0xFF, 0x00))
 
@@ -914,7 +941,7 @@ def test_changed_include_target_rereads_mounted_doc(
 
     app = make_app(srcdir=host, freshenv=True)
     app.build()
-    assert count_warnings(app) == 0
+    _assert_clean_build(app, directive_rst)
 
     # Precondition (teeth): the directive recorded its target as a dependency
     # of the mounted doc, pointing at the external file. Without this, a later
@@ -932,7 +959,7 @@ def test_changed_include_target_rereads_mounted_doc(
     _bump_mtime(bundle / target_name)
 
     app.build()
-    assert count_warnings(app) == 0
+    _assert_clean_build(app, directive_rst)
     read = _docs_read_in_log(app._status.getvalue()[offset:])
 
     assert "_generated/m/index" in read, (

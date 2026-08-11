@@ -184,9 +184,14 @@ attach_each = true
 
 # 4. mounts.mount_at_occupied
 #    strict_mount_at = true, but the host already has a directory at the
-#    mount point (the checked-in _generated/warnings-occupied/). An occupied
-#    mount point means the bundle cannot be attached without modifying the
-#    host, so the whole mount is skipped.
+#    mount point. Create one first, then uncomment this block and rebuild:
+#
+#      mkdir _generated/warnings-occupied
+#
+#    An occupied mount point means the bundle cannot be attached without
+#    modifying the host, so the whole mount is skipped. Remove the
+#    directory afterwards (``rmdir _generated/warnings-occupied``) so the
+#    example stays warning-clean.
 # [[mounts]]
 # dir = "../warnings/bundles/conflicts"
 # mount_at = "_generated/warnings-occupied"
