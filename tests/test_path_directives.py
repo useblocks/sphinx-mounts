@@ -770,10 +770,7 @@ def _write_payload(path: Path, content: str | bytes) -> None:
 def _renderer_missing(directive_rst: str) -> bool:
     """Whether a diagram directive will warn because its external renderer
     binary is not installed (``dot`` for graphviz, ``plantuml``/``java`` for
-    uml). Sphinx emits a warning for the missing binary — environmental
-    noise unrelated to sphinx-mounts, so the strict zero-warning assertion
-    must not apply to those cases (the pytest CI matrix does not install
-    the renderers)."""
+    uml)."""
     if "graphviz" in directive_rst:
         return shutil.which("dot") is None
     if "uml" in directive_rst:
@@ -781,17 +778,45 @@ def _renderer_missing(directive_rst: str) -> bool:
     return False
 
 
+def _allowed_renderer_warning(directive_rst: str) -> str | None:
+    """The message substring of the *exact* warning a missing diagram
+    renderer produces, or ``None`` when the directive shells out to no
+    external binary. Only this one warning is tolerated — any other
+    warning still fails the strict contract."""
+    if "graphviz" in directive_rst:
+        return "dot command"  # sphinx.ext.graphviz: untyped warning
+    if "uml" in directive_rst:
+        return "plantuml command"  # sphinxcontrib.plantuml: type='plantuml'
+    return None
+
+
+def _warning_lines(app) -> list[str]:
+    """The captured Sphinx warning records as plain-text lines."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", app._warning.getvalue())
+    return [line.strip() for line in text.splitlines() if "WARNING:" in line]
+
+
 def _assert_clean_build(app, directive_rst: str) -> None:
     """Enforce the strict warning contract for a successful build.
 
-    sphinx-mounts must never warn here (``count_mount_warnings == 0``), and
-    no Sphinx warning of any kind may appear unless an external diagram
-    renderer binary is missing from the environment (see
-    :func:`_renderer_missing`).
+    sphinx-mounts must never warn here, and no other Sphinx warning may
+    appear — except, when an external diagram renderer binary is missing
+    from the environment, the one specific warning that binary's absence
+    produces (see :func:`_allowed_renderer_warning`). Anything else is a
+    failure, so a stray warning can never hide behind the renderer case.
     """
-    assert count_mount_warnings(app) == 0, app._warning.getvalue()
-    if not _renderer_missing(directive_rst):
-        assert count_warnings(app) == 0, app._warning.getvalue()
+    warnings = _warning_lines(app)
+    mounts = [w for w in warnings if "sphinx-mounts" in w]
+    assert mounts == [], mounts
+    allowed = (
+        _allowed_renderer_warning(directive_rst)
+        if _renderer_missing(directive_rst)
+        else None
+    )
+    for warning in warnings:
+        if allowed is not None and allowed in warning:
+            continue
+        raise AssertionError(f"unexpected warning: {warning}")
 
 
 _RED_PNG = _tiny_png((0xFF, 0x00, 0x00))

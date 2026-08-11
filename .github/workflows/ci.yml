@@ -74,6 +74,11 @@ jobs:
         with:
           python-version: "${{ matrix.python }}"
           allow-prereleases: true
+      # The diagram-directive tests (graphviz/uml) render at build time and
+      # warn when the binary is missing; the strict zero-warning contract
+      # needs the renderers present. setup-plantuml provides PlantUML, a JRE
+      # and Graphviz on all three runner OSes.
+      - uses: jassielof/setup-plantuml@v1
       - run: python -m pip install tox tox-uv
       - run: tox -e "${{ matrix.tox-env }}"
 
