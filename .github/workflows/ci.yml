@@ -76,9 +76,11 @@ jobs:
           allow-prereleases: true
       # The diagram-directive tests (graphviz/uml) render at build time and
       # warn when the binary is missing; the strict zero-warning contract
-      # needs the renderers present. setup-plantuml provides PlantUML, a JRE
-      # and Graphviz on all three runner OSes.
-      - uses: jassielof/setup-plantuml@v1
+      # needs the renderers present. setup-plantuml provides a synchronous
+      # `plantuml` CLI, a JRE and Graphviz on all three runner OSes (the
+      # Windows choco plantuml package's javaw shim does not work for
+      # subprocess invocation).
+      - uses: jassielof/setup-plantuml@1
       - run: python -m pip install tox tox-uv
       - run: tox -e "${{ matrix.tox-env }}"
 
