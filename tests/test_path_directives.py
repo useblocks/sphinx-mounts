@@ -4,11 +4,13 @@ the bundle root; the build fails when a reference escapes that root.
 Covers literalinclude, include, csv-table :file:, raw :file:, image,
 figure, graphviz, uml, mermaid, the three Sphinx-Needs directives that take a
 doc-relative path (needimport, needreport, needuml), plus the path_check
-enforcement. The tests are renderer-independent: mermaid uses 'raw' output, and
-graphviz/uml are asserted via the recorded dependency rather than the rendered
-image, so no mmdc/java/dot binary is required. The one exception is the needuml
-``!include`` test — PlantUML resolves that path itself and records no Sphinx
-dependency, so it must render for real and skips without java/plantuml.
+enforcement. The graphviz/uml cases render for real and **hard-require**
+their renderer binaries (``dot`` / ``plantuml``) — the full mounts chain,
+render included, must be exercised rather than silently skipped when the
+binary is missing (CI installs them; see ``ci.yml``). Mermaid uses 'raw'
+output, so no mmdc is needed. The needuml ``!include`` case renders for
+real too, since PlantUML resolves that path itself and records no Sphinx
+dependency.
 """
 
 from __future__ import annotations
@@ -261,6 +263,7 @@ def test_image_and_figure_resolve_within_bundle(make_app, make_host_project, tmp
 
 
 def test_graphviz_file_resolves_within_bundle(make_app, make_host_project, tmp_path):
+    _require_renderer(".. graphviz:: g.dot\n")
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     (bundle / "g.dot").write_text("digraph { A -> B }\n", encoding="utf-8")
@@ -276,11 +279,12 @@ def test_graphviz_file_resolves_within_bundle(make_app, make_host_project, tmp_p
     app = _build(make_app, host)
 
     assert (bundle / "g.dot").resolve() in _resolved_deps(app, "_g/api/index")
-    assert "not found" not in app._warning.getvalue()
+    assert count_warnings(app) == 0, app._warning.getvalue()
 
 
 def test_uml_file_resolves_within_bundle(make_app, make_host_project, tmp_path):
     pytest.importorskip("sphinxcontrib.plantuml")
+    _require_renderer(".. uml:: d.puml\n")
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     (bundle / "d.puml").write_text("@startuml\nA -> B\n@enduml\n", encoding="utf-8")
@@ -290,13 +294,15 @@ def test_uml_file_resolves_within_bundle(make_app, make_host_project, tmp_path):
 
     host = make_host_project()
     _add_extensions(host, "sphinxcontrib.plantuml")
+    for line in _plantuml_extra_conf():
+        _append_conf(host, line)
     write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
     _replace_index_toctree(host, "_g/api/index")
 
     app = _build(make_app, host)
 
     assert (bundle / "d.puml").resolve() in _resolved_deps(app, "_g/api/index")
-    assert "not found" not in app._warning.getvalue()
+    assert count_warnings(app) == 0, app._warning.getvalue()
 
 
 def test_mermaid_file_resolves_within_bundle(make_app, make_host_project, tmp_path):
@@ -446,14 +452,13 @@ def test_needuml_include_resolves_within_bundle(make_app, make_host_project, tmp
     a mounted document. Requires sphinx-needs > 8.3.0 to pass.
 
     The marker has to travel through the real PlantUML process into the
-    rendered SVG, so unlike the other tests here this one needs ``java`` and
-    ``plantuml`` on PATH.
+    rendered SVG, so unlike the other tests here this one needs the
+    ``plantuml`` binary on PATH — and it is a hard requirement: without it
+    the mounts chain is not really exercised.
     """
     pytest.importorskip("sphinx_needs")
     pytest.importorskip("sphinxcontrib.plantuml")
-    for tool in ("java", "plantuml"):
-        if shutil.which(tool) is None:
-            pytest.skip(f"{tool!r} not on PATH — needed to render the !include")
+    _require_renderer(".. uml::\n")
 
     bundle = tmp_path / "bundle"
     bundle.mkdir()
@@ -469,7 +474,7 @@ def test_needuml_include_resolves_within_bundle(make_app, make_host_project, tmp
         "sphinxcontrib.plantuml",
         # The SVG path applies no scaling, so Pillow is not needed for the
         # ``scale`` attribute sphinx-needs stamps onto every diagram node.
-        conf_lines=("plantuml_output_format = 'svg_img'",),
+        conf_lines=("plantuml_output_format = 'svg_img'", *_plantuml_extra_conf()),
     )
     write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
     _replace_index_toctree(host, "_g/api/index")
@@ -767,56 +772,38 @@ def _write_payload(path: Path, content: str | bytes) -> None:
         path.write_text(content, encoding="utf-8")
 
 
-def _renderer_missing(directive_rst: str) -> bool:
-    """Whether a diagram directive will warn because its external renderer
-    binary is not installed (``dot`` for graphviz, ``plantuml``/``java`` for
-    uml)."""
-    if "graphviz" in directive_rst:
-        return shutil.which("dot") is None
-    if "uml" in directive_rst:
-        return shutil.which("plantuml") is None or shutil.which("java") is None
-    return False
+def _require_renderer(directive_rst: str) -> None:
+    """Fail the test when a diagram directive's external renderer binary is
+    not installed.
 
-
-def _allowed_renderer_warning(directive_rst: str) -> str | None:
-    """The message substring of the *exact* warning a missing diagram
-    renderer produces, or ``None`` when the directive shells out to no
-    external binary. Only this one warning is tolerated — any other
-    warning still fails the strict contract."""
-    if "graphviz" in directive_rst:
-        return "dot command"  # sphinx.ext.graphviz: untyped warning
-    if "uml" in directive_rst:
-        return "plantuml command"  # sphinxcontrib.plantuml: type='plantuml'
-    return None
-
-
-def _warning_lines(app) -> list[str]:
-    """The captured Sphinx warning records as plain-text lines."""
-    text = re.sub(r"\x1b\[[0-9;]*m", "", app._warning.getvalue())
-    return [line.strip() for line in text.splitlines() if "WARNING:" in line]
-
-
-def _assert_clean_build(app, directive_rst: str) -> None:
-    """Enforce the strict warning contract for a successful build.
-
-    sphinx-mounts must never warn here, and no other Sphinx warning may
-    appear — except, when an external diagram renderer binary is missing
-    from the environment, the one specific warning that binary's absence
-    produces (see :func:`_allowed_renderer_warning`). Anything else is a
-    failure, so a stray warning can never hide behind the renderer case.
+    The graphviz/uml cases must exercise the full mounts chain *including*
+    the real renderer — tolerating a missing binary would silently skip the
+    render step. Install the renderers (e.g. ``apt install graphviz
+    default-jre plantuml``) rather than running the suite without them.
     """
-    warnings = _warning_lines(app)
-    mounts = [w for w in warnings if "sphinx-mounts" in w]
-    assert mounts == [], mounts
-    allowed = (
-        _allowed_renderer_warning(directive_rst)
-        if _renderer_missing(directive_rst)
-        else None
-    )
-    for warning in warnings:
-        if allowed is not None and allowed in warning:
-            continue
-        raise AssertionError(f"unexpected warning: {warning}")
+    if "graphviz" in directive_rst:
+        assert shutil.which("dot"), (
+            "graphviz (the `dot` binary) is required to run this test — "
+            "install it (e.g. `apt install graphviz`)"
+        )
+    elif "uml" in directive_rst:
+        assert shutil.which("plantuml"), (
+            "plantuml is required to run this test — install it (e.g. "
+            "`apt install plantuml`, `brew install plantuml`, "
+            "`choco install plantuml`)"
+        )
+
+
+def _plantuml_extra_conf() -> tuple[str, ...]:
+    """Extra conf.py lines for the uml tests.
+
+    sphinxcontrib.plantuml invokes the ``plantuml`` command synchronously;
+    on Windows the chocolatey package's ``plantuml`` shim is non-blocking
+    (javaw), so its ``plantumlc`` (java) shim must be used there.
+    """
+    if os.name == "nt":
+        return ("plantuml = 'plantumlc'",)
+    return ()
 
 
 _RED_PNG = _tiny_png((0xFF, 0x00, 0x00))
@@ -948,6 +935,7 @@ def test_changed_include_target_rereads_mounted_doc(
     set, not just ``literalinclude``."""
     if requires is not None:
         pytest.importorskip(requires)
+    _require_renderer(directive_rst)
 
     bundle = tmp_path / "bundle"
     bundle.mkdir()
@@ -959,14 +947,14 @@ def test_changed_include_target_rereads_mounted_doc(
     host = make_host_project()
     if extensions:
         _add_extensions(host, *extensions)
-    for line in conf_lines:
+    for line in conf_lines + _plantuml_extra_conf():
         _append_conf(host, line)
     write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_generated/m"}])
     _replace_index_toctree(host, "_generated/m/index")
 
     app = make_app(srcdir=host, freshenv=True)
     app.build()
-    _assert_clean_build(app, directive_rst)
+    assert count_warnings(app) == 0, app._warning.getvalue()
 
     # Precondition (teeth): the directive recorded its target as a dependency
     # of the mounted doc, pointing at the external file. Without this, a later
@@ -984,7 +972,7 @@ def test_changed_include_target_rereads_mounted_doc(
     _bump_mtime(bundle / target_name)
 
     app.build()
-    _assert_clean_build(app, directive_rst)
+    assert count_warnings(app) == 0, app._warning.getvalue()
     read = _docs_read_in_log(app._status.getvalue()[offset:])
 
     assert "_generated/m/index" in read, (
