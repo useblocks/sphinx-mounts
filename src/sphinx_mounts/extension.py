@@ -143,8 +143,14 @@ def _on_doctree_read(app: Sphinx, doctree: nodes.document) -> None:
             doctree, toctrees, docname, mount, index, entries[0]
         )
         if target is None:
-            # toctree_index was out of range — warned and skipped, so the
-            # host doc stays untouched.
+            # toctree_index was out of range — the mount is left unwired.
+            # Mark its docs as orphans so the build emits exactly one
+            # warning (mounts.toctree_index) instead of additionally
+            # reporting each of them as not included in any toctree
+            # (toc.not_included) — the induced error must leave the host
+            # project untouched.
+            for entry in entries:
+                app.env.metadata[entry]["orphan"] = True
             continue
         added: list[str] = []
         for entry in entries:

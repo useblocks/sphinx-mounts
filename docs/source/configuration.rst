@@ -757,7 +757,8 @@ at once), and escalated to a failed build:
        ``path_check = "warn"``)
    * - ``mounts.toctree_index``
      - ``toctree_index`` exceeds the number of toctrees in the
-       ``attach_to`` document; the mount is not wired in
+       ``attach_to`` document; the mount is left unwired and its docs are
+       marked as orphans, so no ``toc.not_included`` follows
    * - ``mounts.unknown_suffix``
      - a file-list entry has no extension registered in
        ``source_suffix``; the whole mount is skipped

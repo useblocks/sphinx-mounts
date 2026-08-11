@@ -33,8 +33,10 @@ Unreleased
     all drop the entire mount with exactly one warning — the build then
     emits *no* further warnings (no ``toc.not_included`` orphans, no
     ``toc.circular`` toctree noise), proving the host was left untouched.
-    An out-of-range ``toctree_index`` skips only the toctree wiring, and
-    the existing ``attach_to``/``path_check`` warnings are typed too. Each
+    An out-of-range ``toctree_index`` skips only the toctree wiring and
+    marks the mount's docs as orphans (no ``toc.not_included`` follows),
+    and the existing ``attach_to``/``path_check`` warnings are typed too.
+    Each
     warning names the offending mount by its config index and source path
     (e.g. ``mounts[0] (dir=/abs/path/to/bundle)``) and carries a
     ``mounts.<subtype>`` type, so users can suppress one problem

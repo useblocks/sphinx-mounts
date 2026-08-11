@@ -1483,16 +1483,14 @@ def test_attach_to_targets_specific_toctree_by_index(
 def test_attach_to_index_out_of_range_warns_and_skips(
     make_app, make_host_project, bundle_simple
 ):
-    """Asking for a toctree that doesn't exist emits a
+    """Asking for a toctree that doesn't exist emits exactly one
     ``mounts.toctree_index`` warning and leaves the host doc untouched
-    instead of failing the build. The mount itself is healthy, so it stays
-    mounted; only the wiring is skipped. The host references the mount's
-    entry doc by hand so nothing orphans."""
+    instead of failing the build. The mount is left unwired and its docs
+    are marked as orphans, so — even though the host references nothing —
+    no ``toc.not_included`` warning follows: the induced error must leave
+    the host project completely untouched."""
     host = make_host_project()
-    _set_index_rst(
-        host,
-        "Host\n====\n\n.. toctree::\n   :maxdepth: 1\n\n   _generated/api-foo/index\n",
-    )
+    _set_index_rst(host, "Host\n====\n\n.. toctree::\n   :maxdepth: 1\n")
     write_ubproject_toml(
         host,
         [
@@ -1513,12 +1511,14 @@ def test_attach_to_index_out_of_range_warns_and_skips(
     assert "mounts.toctree_index" in warnings
     assert count_warnings(app) == 1  # only the toctree_index warning
     assert count_mount_warnings(app) == 1
-    # The host toctree is untouched: exactly the static entry, nothing
-    # wired on top.
+    # The host toctree is untouched: still empty, nothing wired on top.
     doctree = app.env.get_doctree("index")
     toctrees = list(doctree.findall(addnodes.toctree))
     assert len(toctrees) == 1
-    assert toctrees[0]["includefiles"] == ["_generated/api-foo/index"]
+    assert toctrees[0]["includefiles"] == []
+    # The mount's entry doc is marked orphan — that is what keeps the
+    # unreferenced mount from producing toc.not_included noise.
+    assert app.env.metadata["_generated/api-foo/index"].get("orphan")
 
 
 def test_attach_to_creates_toctree_when_absent(

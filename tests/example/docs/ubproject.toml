@@ -206,11 +206,9 @@ attach_each = true
 
 # 6. mounts.toctree_index
 #    attach_to's toctree_index exceeds the number of toctrees in the
-#    attach_to document (the host index has one toctree), so the mount is
-#    left unwired. Because nothing references its doc, Sphinx additionally
-#    reports it as not included in any toctree (toc.not_included) —
-#    reference the doc from the host to see only the mounts.toctree_index
-#    warning.
+#    attach_to document (the host index has one toctree). The mount is
+#    left unwired and its docs are marked as orphans, so exactly this one
+#    warning appears — the host project is left completely untouched.
 # [[mounts]]
 # dir = "../warnings/bundles/single"
 # mount_at = "_generated/warnings-single"
