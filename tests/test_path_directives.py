@@ -560,11 +560,11 @@ def _leaking_literalinclude_bundle(tmp_path: Path, ref: str) -> Path:
     return bundle
 
 
-def test_escape_via_leading_slash_fails_by_default(
+def test_escape_via_leading_slash_fails_at_path_check_error(
     make_app, make_host_project, tmp_path
 ):
     """A leading-slash reference resolves to the host srcdir (outside the
-    bundle); the default path_check='error' fails the build."""
+    bundle); ``path_check = "error"`` fails the build."""
     bundle = _leaking_literalinclude_bundle(tmp_path, "/host_secret.py")
     host = make_host_project()
     (host / "host_secret.py").write_text("HOST_SECRET = 1\n", encoding="utf-8")
@@ -578,10 +578,11 @@ def test_escape_via_leading_slash_fails_by_default(
         app.build()
 
 
-def test_escape_via_parent_climb_fails_by_default(
+def test_escape_via_parent_climb_fails_at_path_check_error(
     make_app, make_host_project, tmp_path
 ):
-    """A ``../`` reference that climbs above the bundle root fails by default."""
+    """A ``../`` reference that climbs above the bundle root fails at
+    ``path_check = "error"``."""
     bundle = tmp_path / "bundle"
     (bundle / "sub").mkdir(parents=True)
     (tmp_path / "outside.py").write_text("OUTSIDE = 1\n", encoding="utf-8")

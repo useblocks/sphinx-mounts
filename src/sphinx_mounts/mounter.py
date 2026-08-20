@@ -81,8 +81,8 @@ def _listed_roots(files: Iterable[Path]) -> tuple[Path, ...]:
       drives the root arbitrarily wide. Two files in sibling subtrees make
       their shared parent the root, and two files on genuinely disjoint
       branches make it the filesystem root — at which point ``path_check``
-      silently permits every file on the machine, with no diagnostic,
-      including at its default ``"error"``.
+      silently permits every file on the machine, with no diagnostic, even
+      at ``"error"``.
 
     The union has neither problem. It is a strict superset of the per-document
     rule, so the asymmetry stays fixed, and a strict subset of the common
