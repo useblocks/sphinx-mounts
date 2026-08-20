@@ -2506,6 +2506,48 @@ def test_no_attach_to_mount_entry_doc_appearing_is_silent(
     )
 
 
+def test_dangling_attach_to_does_not_announce_a_re_read(
+    make_app, make_host_project, tmp_path
+):
+    """A mount whose ``attach_to`` names a document that does not exist must
+    not claim to re-read it — on this build or any later one.
+
+    Sphinx intersects the names this handler returns with ``env.found_docs``,
+    so returning a nonexistent one was harmless in effect. But the handler
+    logged before that intersection, so a single typo produced
+    ``re-reading ['nosuchdoc']`` on every incremental build for ever,
+    announcing an action nothing could perform. The missing target itself is
+    still reported exactly once, by the consistency check.
+    """
+    host = make_host_project()
+    bundle = _make_solo_bundle(tmp_path, "orphaned")
+    write_ubproject_toml(
+        host,
+        [{"dir": str(bundle), "mount_at": "_g/m", "attach_to": "nosuchdoc"}],
+    )
+    _replace_index_toctree(host, "_g/m/index")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+    # Exactly one diagnostic, and it is the missing target.
+    assert count_mount_warnings(app) == 1, app._warning.getvalue()
+    assert "mounts.attach_to_missing" in app._warning.getvalue()
+
+    # Removing the entry doc moves the wiring signature, which is what used to
+    # make the handler announce the re-read. It is also the shape that repeats
+    # for ever in a real build: with nothing re-readable, Sphinx persists no
+    # environment, so the next run recomputes the same change.
+    offset = len(app._status.getvalue())
+    (bundle / "index.rst").unlink()
+    app.build()
+
+    later_log = app._status.getvalue()[offset:]
+    assert "mount wiring changed" not in later_log, (
+        f"announced re-reading a document that does not exist; log={later_log!r}"
+    )
+    assert "nosuchdoc" not in later_log, later_log
+
+
 def test_mounts_confval_rebuilds_the_env(make_app, make_host_project, bundle_simple):
     """``mounts`` must stay registered with ``rebuild="env"``.
 
