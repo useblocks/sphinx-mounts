@@ -379,17 +379,52 @@ def _on_check_path_confinement(app: Sphinx, env: Any) -> None:  # noqa: ARG001
             abs_dep = (srcdir / dep).resolve()
             if abs_dep == resolved_root or resolved_root in abs_dep.parents:
                 continue
-            msg = (
-                f"sphinx-mounts: mounted doc {docname!r} references a file "
-                f"outside its bundle root: {abs_dep} is not under {resolved_root}. "
-                f"Mounted bundles must be self-contained — use a path "
-                f"relative to the bundle root (no leading '/', and no '..' "
-                f'climbing above the bundle). Set path_check = "warn" or '
-                f'"off" on the mount to relax this check.'
-            )
+            msg = _path_escape_message(docname, dep, abs_dep, resolved_root)
             if mode == "error":
-                raise ExtensionError(msg)
+                # Log the actionable line FIRST. On Sphinx >= 8.2 every
+                # ``SphinxError`` is rendered by
+                # ``sphinx/_cli/util/errors.py:handle_exception``, which
+                # unconditionally prints Versions / Last Messages / Loaded
+                # Extensions / Traceback blocks and an invitation to open an
+                # issue against Sphinx. Without this line the one sentence the
+                # bundle author needs is buried inside a crash report about
+                # someone else's project.
+                logger.error(msg)
+                # ``modname`` is what makes the header read "Extension error
+                # (sphinx_mounts)" rather than a bare "Extension error", so the
+                # report at least names the extension that objected. Matches
+                # what ``TomlConfigError`` / ``MountConfigError`` pass.
+                raise ExtensionError(msg, modname="sphinx_mounts")
             log_warning(logger, msg, "path_escape", location=docname)
+
+
+def _path_escape_message(
+    docname: str, dep: Any, abs_dep: Path, resolved_root: Path
+) -> str:
+    """Compose the ``path_check`` message for one escaping dependency.
+
+    Both the recorded dependency and its resolved form are printed. They can
+    differ in two ways that change what the author has to fix, and printing
+    only the resolved path made the advice misleading in each:
+
+    * Sphinx records the dependency as ``srcdir / rel_fn`` with the ``..``
+      segments still in it, so the resolved path alone hides which directive
+      argument produced it.
+    * A symlink inside the bundle that points outside it is an escape even
+      though the path written in the directive is plainly bundle-relative.
+      Telling that author to avoid a leading ``/`` or ``..`` describes
+      something they never wrote.
+    """
+    return (
+        f"sphinx-mounts: mounted doc {docname!r} references a file outside its "
+        f"bundle root: the recorded dependency {dep} resolves to {abs_dep}, "
+        f"which is not under {resolved_root}. Mounted bundles must be "
+        f"self-contained — use a path relative to the bundle root (no leading "
+        f"'/', and no '..' climbing above the bundle). A symlink pointing out "
+        f"of the bundle counts as an escape too, even when the path written in "
+        f'the directive is plainly bundle-relative. Set path_check = "warn" or '
+        f'"off" on the mount to relax this check.'
+    )
 
 
 def _build_toctree_node(parent: str, entry: str) -> addnodes.toctree:

@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 import zlib
 
 import pytest
+from sphinx.errors import ExtensionError
 
 from tests.conftest import count_mount_warnings, count_warnings, write_ubproject_toml
 
@@ -637,6 +638,164 @@ def test_files_mode_escape_fails(make_app, make_host_project, tmp_path):
     with pytest.raises(Exception, match=r"outside its bundle root"):
         app = make_app(srcdir=host, freshenv=True)
         app.build()
+
+
+def test_path_check_error_is_attributed_to_this_extension(
+    make_app, make_host_project, tmp_path
+):
+    """The default ``path_check = "error"`` must name sphinx-mounts and print
+    the actionable line before the crash report.
+
+    A bundle-authoring mistake is rendered by Sphinx as a crash: from Sphinx
+    8.2 on, ``sphinx/_cli/util/errors.py:handle_exception`` prints Versions /
+    Last Messages / Loaded Extensions / Traceback blocks for *every*
+    ``SphinxError``, plus an invitation to open an issue against Sphinx
+    itself. This raise used to pass no ``modname``, so the header read a bare
+    ``Extension error!`` and the sentence explaining what the author did wrong
+    was buried in the middle of that report.
+
+    ``ExtensionError.category`` is asserted directly because it is literally
+    what the CLI prints as the first line
+    (``print_red(f'{exception.category}!')``).
+    """
+    bundle = _leaking_literalinclude_bundle(tmp_path, "../outside.txt")
+    (tmp_path / "outside.txt").write_text("OUTSIDE\n", encoding="utf-8")
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = make_app(srcdir=host, freshenv=True)
+    with pytest.raises(ExtensionError) as excinfo:
+        app.build()
+
+    assert excinfo.value.modname == "sphinx_mounts"
+    assert excinfo.value.category == "Extension error (sphinx_mounts)"
+    # The human message is logged before the raise, so it is not buried.
+    logged = app._warning.getvalue()
+    assert "outside its bundle root" in logged, logged
+    assert "ERROR" in logged, logged
+
+
+def test_path_escape_message_names_recorded_and_resolved_paths(
+    make_app, make_host_project, tmp_path
+):
+    """The message must print the recorded dependency next to the resolved
+    one, so it is clear which directive argument produced the escape.
+
+    Sphinx records the dependency as ``srcdir / rel_fn`` with the ``..``
+    segments still in place; the resolved path alone does not show what was
+    written in the source.
+    """
+    bundle = _leaking_literalinclude_bundle(tmp_path, "../outside.txt")
+    (tmp_path / "outside.txt").write_text("OUTSIDE\n", encoding="utf-8")
+    host = make_host_project()
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "warn"}]
+    )
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)
+
+    warnings = app._warning.getvalue()
+    assert "recorded dependency" in warnings, warnings
+    # The resolved target is named...
+    assert str((tmp_path / "outside.txt").resolve()) in warnings
+    # ...and so is the un-normalised form Sphinx actually stored.
+    recorded = list(app.env.dependencies["_g/api/index"])
+    assert recorded, "no dependency recorded for the mounted doc"
+    assert any(str(dep) in warnings for dep in recorded), warnings
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="symlink creation needs elevated rights on Windows"
+)
+def test_path_escape_via_symlink_message_mentions_symlinks(
+    make_app, make_host_project, tmp_path
+):
+    """An escape through an in-bundle symlink must say so.
+
+    The author wrote a plain bundle-relative name — no leading ``/``, no
+    ``..`` — so advice to avoid those two things describes something they
+    never did. Nothing in the message used to explain why the reference was
+    rejected.
+
+    Naming the authored path is not an option here: Sphinx resolves the
+    symlink *before* recording the dependency, so ``env.dependencies`` holds
+    the link target expressed relative to srcdir and the name written in the
+    directive is not recoverable at check time (asserted below, so a future
+    Sphinx that keeps the link path makes this visible). That is exactly why
+    the message has to state the symlink rule outright.
+    """
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("OUTSIDE_VIA_LINK\n", encoding="utf-8")
+    (bundle / "looks_local.txt").symlink_to(outside)
+    (bundle / "index.rst").write_text(
+        "Bundle\n======\n\n.. literalinclude:: looks_local.txt\n", encoding="utf-8"
+    )
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "warn"}]
+    )
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)
+
+    warnings = app._warning.getvalue()
+    assert "outside its bundle root" in warnings, warnings
+    # Match the whole sentence, not the bare word "symlink": the warning
+    # quotes filesystem paths that contain pytest's tmp_path, which embeds
+    # this test's own name — asserting on the word alone passes vacuously.
+    assert "A symlink pointing out of the bundle counts as an escape" in warnings, (
+        warnings
+    )
+    # The escape really did land on the link's target...
+    assert str(outside.resolve()) in warnings, warnings
+    # ...and Sphinx recorded the target, not the authored link name, which is
+    # what makes the explicit symlink sentence necessary.
+    recorded = [str(d) for d in app.env.dependencies["_g/api/index"]]
+    assert recorded, "no dependency recorded for the mounted doc"
+    assert not any("looks_local.txt" in dep for dep in recorded), (
+        f"Sphinx now records the authored link path ({recorded}) — the message "
+        f"could name it directly"
+    )
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="symlink creation needs elevated rights on Windows"
+)
+def test_symlinked_bundle_root_is_not_an_escape(make_app, make_host_project, tmp_path):
+    """Reaching the bundle through a symlinked directory must NOT be flagged.
+
+    This is the documented Bazel flow — ``bazel-bin`` is itself a symlink into
+    the execroot — so a false positive here would break the extension's
+    flagship use case. It holds because both sides of the comparison are
+    resolved: ``_resolve_dir`` resolves the configured ``dir`` at config time
+    and the check resolves each dependency. Nothing pinned that symmetry.
+    """
+    real = tmp_path / "real_bundle"
+    real.mkdir()
+    (real / "snippet.py").write_text("IN_BUNDLE = 1\n", encoding="utf-8")
+    (real / "index.rst").write_text(
+        "Bundle\n======\n\n.. literalinclude:: snippet.py\n", encoding="utf-8"
+    )
+    link = tmp_path / "link_bundle"
+    link.symlink_to(real, target_is_directory=True)
+
+    host = make_host_project()
+    # Mounted through the LINK, with the strictest setting.
+    write_ubproject_toml(
+        host, [{"dir": str(link), "mount_at": "_g/api", "path_check": "error"}]
+    )
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)  # must NOT raise
+
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    html = (Path(app.outdir) / "_g" / "api" / "index.html").read_text(encoding="utf-8")
+    assert "IN_BUNDLE" in html
 
 
 # ---------- Task 6: leak boundaries (documented with path_check='off') ----------
