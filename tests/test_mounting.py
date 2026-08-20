@@ -1989,6 +1989,219 @@ def test_incremental_rereads_changed_file_in_file_list_mount(
     )
 
 
+# ---------- incremental attach_to re-wiring ----------
+#
+# ``_on_doctree_read`` can only inject toctree entries into documents Sphinx
+# decides to re-read, and a host doc's own mtime never moves when a *bundle*
+# gains or loses its entry doc. The ``env-get-outdated`` handler is what makes
+# the host doc outdated in exactly those cases; without it the wiring went
+# permanently stale in both directions and only ``-E`` cleared it. These tests
+# therefore never pass ``freshenv=True`` on the follow-up builds — a fresh env
+# is precisely what hides the bug.
+
+
+def _make_solo_bundle(tmp_path: Path, name: str = "solo") -> Path:
+    """Create a writable one-document bundle directory and return it.
+
+    A single ``index.rst`` with no toctree of its own keeps the warning
+    budget at zero: adding or removing it changes exactly the docname that
+    ``attach_to`` wires, with no sibling left orphaned.
+    """
+    bundle = tmp_path / name
+    bundle.mkdir()
+    (bundle / "index.rst").write_text(
+        "Bundle entry\n============\n\nBUNDLE_ENTRY_MARKER\n", encoding="utf-8"
+    )
+    return bundle
+
+
+def test_disappearing_mount_entry_unwires_host_toctree_incrementally(
+    make_app, make_host_project, tmp_path
+):
+    """When a bundle's entry doc disappears, the next incremental build must
+    drop it from the host toctree — no dead link, no ``toc.not_readable``.
+
+    Previously the host doc was never re-read (its mtime did not move), so
+    the injected entry survived in the cached doctree: every later build
+    shipped a dead ``href`` and repeated ``toctree contains reference to
+    non-existing document``, which fails ``sphinx-build -W``. It never
+    converged either, because Sphinx guards the env pickling behind
+    ``if updated_docnames:`` and a removal-only build updated nothing.
+    """
+    host = make_host_project()
+    bundle = _make_solo_bundle(tmp_path)
+    write_ubproject_toml(
+        host,
+        [{"dir": str(bundle), "mount_at": "_g/m", "attach_to": "index"}],
+    )
+    _set_index_rst(host, "Host\n====\n\nHost prose, no toctree of its own.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    index_html = (Path(app.outdir) / "index.html").read_text(encoding="utf-8")
+    assert "_g/m/index.html" in index_html, "entry doc was not wired on build 1"
+
+    offset = len(app._status.getvalue())
+    (bundle / "index.rst").unlink()
+
+    app.build()
+    removal_log = app._status.getvalue()[offset:]
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    index_html = (Path(app.outdir) / "index.html").read_text(encoding="utf-8")
+    assert "_g/m/index.html" not in index_html, (
+        "host page still links to the removed mount entry"
+    )
+    # The host doc had to be re-read for the entry to go away.
+    assert "index" in _docs_read_in_log(removal_log), (
+        f"host doc not re-read on the removal build; log={removal_log!r}"
+    )
+    # Re-reading it also un-sticks the env: Sphinx pickles the environment
+    # (and runs the consistency checks) only ``if updated_docnames``, so a
+    # removal-only build used to persist nothing and recompute the same
+    # "1 removed" for ever.
+    assert "pickling environment" in removal_log, (
+        f"env was not persisted on the removal build; log={removal_log!r}"
+    )
+
+    # ...and the next build has genuinely nothing left to do.
+    offset = len(app._status.getvalue())
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    assert "no targets are out of date" in app._status.getvalue()[offset:], (
+        "removal did not converge — the build still finds outdated targets"
+    )
+
+
+def test_appearing_mount_entry_wires_host_toctree_incrementally(
+    make_app, make_host_project, tmp_path
+):
+    """When a bundle's entry doc appears, the next incremental build must wire
+    it into the host toctree.
+
+    This is the mirror image and the common case in a build-system flow: the
+    developer finally runs the upstream build, the bundle is mounted and
+    rendered — and used to be silently absent from the navigation (plus a
+    ``toc.not_included`` warning) until someone touched the host doc or wiped
+    ``.doctrees``.
+    """
+    host = make_host_project()
+    bundle = tmp_path / "late"
+    bundle.mkdir()
+    write_ubproject_toml(
+        host,
+        [{"dir": str(bundle), "mount_at": "_g/m", "attach_to": "index"}],
+    )
+    _set_index_rst(host, "Host\n====\n\nHost prose, no toctree of its own.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    index_html = (Path(app.outdir) / "index.html").read_text(encoding="utf-8")
+    assert "_g/m/index.html" not in index_html, "nothing should be wired yet"
+
+    # No mtime bump: a docname Sphinx has never seen is "added" outright, so
+    # this does not depend on filesystem mtime resolution. (Bumping the mtime
+    # into the future would instead keep the doc permanently "changed", which
+    # would defeat the convergence assertion below.)
+    (bundle / "index.rst").write_text(
+        "Bundle entry\n============\n\nBUNDLE_ENTRY_MARKER\n", encoding="utf-8"
+    )
+
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    index_html = (Path(app.outdir) / "index.html").read_text(encoding="utf-8")
+    assert "_g/m/index.html" in index_html, (
+        "appearing entry doc was not wired into the host toctree"
+    )
+
+    offset = len(app._status.getvalue())
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    assert "no targets are out of date" in app._status.getvalue()[offset:], (
+        "wiring did not converge — the build still finds outdated targets"
+    )
+
+
+def test_bundle_churn_without_attach_to_does_not_reread_host(
+    make_app, make_host_project, tmp_path
+):
+    """A mount with no ``attach_to`` never touches a host toctree, so adding a
+    file to its bundle must NOT drag any host doc into the re-read set.
+
+    Guards the ``env-get-outdated`` handler against over-triggering: the
+    signature only tracks mounts that actually wire something, so an
+    unrelated 200-file bundle churning does not re-read host pages.
+    """
+    host = make_host_project()
+    bundle = _make_solo_bundle(tmp_path, "plain")
+    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/m"}])
+    _replace_index_toctree(host, "_g/m/index")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    offset = len(app._status.getvalue())
+
+    # A brand-new docname is reported as "added" without any mtime comparison.
+    (bundle / "extra.rst").write_text(":orphan:\n\nExtra\n=====\n", encoding="utf-8")
+
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    read = _docs_read_in_log(app._status.getvalue()[offset:])
+    assert read == {"_g/m/extra"}, (
+        f"expected only the new bundle file to be read; read={read}"
+    )
+
+
+def test_attach_each_rewires_when_the_listed_set_changes(
+    make_app, make_host_project, tmp_path
+):
+    """``attach_each`` wires every listed file, so the signature must track the
+    whole set — not just the entry doc.
+
+    A file-list mount whose files come and go is exactly the generated-bundle
+    case ``attach_each`` exists for, so the re-wiring has to follow the set.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    page_a = pkg / "page_a.rst"
+    page_b = pkg / "page_b.rst"
+    page_a.write_text("Page A\n======\n\nA_MARKER\n", encoding="utf-8")
+    page_b.write_text("Page B\n======\n\nB_MARKER\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "files": [str(page_a), str(page_b)],
+                "mount_at": "_g/m",
+                "attach_to": "index",
+                "attach_each": True,
+            }
+        ],
+    )
+    _set_index_rst(host, "Host\n====\n\nHost prose, no toctree of its own.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    index_html = (Path(app.outdir) / "index.html").read_text(encoding="utf-8")
+    assert "_g/m/page_a.html" in index_html
+    assert "_g/m/page_b.html" in index_html
+
+    # One listed file goes missing: the whole mount is skipped (existing
+    # doctrine), so BOTH entries must disappear from the host toctree.
+    page_b.unlink()
+    app.build()
+    index_html = (Path(app.outdir) / "index.html").read_text(encoding="utf-8")
+    assert "_g/m/page_a.html" not in index_html, (
+        "skipped mount still wired into the host toctree"
+    )
+    assert "_g/m/page_b.html" not in index_html
+
+
 # ---------- stored path type ----------
 
 
