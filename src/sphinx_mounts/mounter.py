@@ -409,6 +409,36 @@ def _build_walker(
     return builder.build()
 
 
+def _warn_ignored_walk_options(mount: MountConfig, index: int) -> None:
+    """Warn when a file-list mount sets options only directory mode reads.
+
+    ``include`` and ``exclude`` are gitignore-style patterns handed to the
+    directory walker. A file-list mount has no walker — the ``files`` list
+    *is* the selection — so the patterns are ignored completely: setting
+    ``include = ["one.rst"]`` on a two-file mount still mounts both. Nothing
+    said so, which made it the odd one out among this extension's
+    cross-key rules; every other contradictory combination
+    (``attach_each`` without ``files``, ``strict_mount_at`` on a root mount)
+    is rejected at config time.
+
+    It is a warning rather than a hard error because, unlike those, it is not
+    ambiguous what the user gets: the mount is well-formed and mounts exactly
+    the files they listed. Only their filter is dead.
+    """
+    ignored = [name for name in ("include", "exclude") if getattr(mount, name, ())]
+    if not ignored:
+        return
+    keys = " and ".join(ignored)
+    msg = (
+        f"sphinx-mounts: {mount_label(mount, index)} sets {keys}, which only "
+        f"directory mounts read — a file-list mount has no walker to filter, "
+        f"so the `files` list is the selection and {keys} has no effect. "
+        f"Remove it, or switch the mount to `dir` if you meant to filter a "
+        f"tree."
+    )
+    log_warning(logger, msg, "ignored_option")
+
+
 def _attach_mount_files(
     project: _MountAwareProject, mount: MountConfig, files: Iterable[Path], index: int
 ) -> list[str]:
@@ -418,6 +448,7 @@ def _attach_mount_files(
     tail, so the result is a flat namespace. All of them share the mount's
     confinement root *set* — see :func:`_listed_roots`.
     """
+    _warn_ignored_walk_options(mount, index)
     suffixes = tuple(project.source_suffix)
     listed = list(files)
     entries: list[tuple[str, Path]] = []
@@ -514,8 +545,7 @@ def _attach_entries(
                 f"{mount_label(mount, index)} would supply {abs_path}, "
                 f"but {existing} already provides it — "
                 f"{_skip_consequence(entries)} Mount the bundle under a "
-                f"different mount_at, or use the mount's include / exclude "
-                f"patterns to leave the colliding file out."
+                f"different mount_at, or {_drop_one_file_remedy(mount)}."
             )
             log_warning(logger, msg, "docname_conflict")
             return []
@@ -524,10 +554,9 @@ def _attach_entries(
                 f"sphinx-mounts: docname conflict for {docname!r}: "
                 f"{mount_label(mount, index)} maps two of its own files to "
                 f"that docname — {seen[docname]} and {abs_path} — "
-                f"{_skip_consequence(entries)} Rename or drop one of the "
-                f"two files, or use the mount's include / exclude patterns "
-                f"to select just one; changing mount_at does not help, "
-                f"because both files move with it."
+                f"{_skip_consequence(entries)} Rename one of the two files, "
+                f"or {_drop_one_file_remedy(mount)}; changing mount_at does "
+                f"not help, because both files move with it."
             )
             log_warning(logger, msg, "docname_conflict")
             return []
@@ -553,8 +582,25 @@ def _skip_consequence(entries: list[tuple[str, Path]]) -> str:
     from hiding behind a single line in a long build log.
     """
     count = len(entries)
-    files = "file" if count == 1 else "files"
-    return f"the whole mount is skipped, dropping all {count} {files} it provides."
+    if count == 1:
+        return "the whole mount is skipped, dropping the only file it provides."
+    return f"the whole mount is skipped, dropping all {count} files it provides."
+
+
+def _drop_one_file_remedy(mount: MountConfig) -> str:
+    """The "leave one of them out" half of a conflict message's remedy.
+
+    It has to be mode-dependent. ``include`` / ``exclude`` are directory-mode
+    patterns evaluated relative to ``dir``; on a file-list mount they are
+    ignored entirely (see :func:`_warn_ignored_walk_options`), so offering
+    them there described an action that would have no effect. And the
+    intra-mount basename collision is *principally* a file-list failure —
+    that mode is the flat namespace — so the mode where the advice was
+    inapplicable was the mode where the message fires most.
+    """
+    if mount.files is not None:
+        return "remove one of the two entries from the mount's `files` list"
+    return "use the mount's include / exclude patterns to leave it out"
 
 
 def _match_suffix(filename: str, suffixes: Iterable[str]) -> str | None:

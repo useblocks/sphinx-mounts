@@ -41,6 +41,7 @@ WarningTopics = Literal[
     "attach_to_missing",
     "docname_conflict",
     "empty_docname",
+    "ignored_option",
     "missing_path",
     "mount_at_occupied",
     "path_escape",

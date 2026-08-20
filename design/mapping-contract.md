@@ -151,7 +151,12 @@ Only files whose name ends with a registered source suffix are kept (§5.3).
 
 ### 5.2 File-list mode
 
-No walk. Each listed file is taken as given, and:
+No walk. `include`, `exclude` and `gitignore` are therefore not read at all:
+they configure the walker, and there is none.
+Setting `include` or `exclude` here is reported as
+`mounts.ignored_option` and changes nothing.
+
+Each listed file is taken as given, and:
 
 - a listed file that does not exist skips the **whole mount**
   (`mounts.missing_path`);
@@ -279,6 +284,7 @@ or repurposed without a breaking release.
 | `mounts.attach_to_missing` | `attach_to` names a docname that does not exist | nothing wired |
 | `mounts.docname_conflict` | collision per rules 1-3 above | whole mount skipped |
 | `mounts.empty_docname` | a listed file's name is only a suffix | whole mount skipped |
+| `mounts.ignored_option` | a file-list mount sets `include` or `exclude` | reported only; the keys have no effect |
 | `mounts.missing_path` | `dir` or a listed file is not on disk | whole mount skipped |
 | `mounts.mount_at_occupied` | `strict_mount_at` set, host has a directory at `mount_at` | whole mount skipped |
 | `mounts.path_escape` | a reference leaves the bundle root, `path_check = "warn"` | reported only |

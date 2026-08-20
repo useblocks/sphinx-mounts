@@ -117,9 +117,10 @@ docname, which happens in both modes: two listed files sharing a
 basename (file-list mode flattens the namespace), or two files
 differing only in registered suffix such as ``index.rst`` beside
 ``index.md``. Nothing is silently hidden in either case; conflicts have
-to be resolved by the author (rename one side, narrow the mount's
-``include`` / ``exclude``, or move the host file). The warning names
-both contributing paths and how many files the skip drops. See
+to be resolved by the author (rename one side, drop an entry from
+``files``, narrow a directory mount's ``include`` / ``exclude``, or move
+the host file). The warning names both contributing paths, how many files
+the skip drops, and the remedy that applies to that mount's mode. See
 :ref:`warnings-and-errors` for how to suppress or escalate it.
 
 **There is no "unmount".** The mount mapping is read once per
@@ -732,6 +733,11 @@ Walk policy used by sphinx-mounts:
   ``dir``. Patterns like ``**/*.rst``, ``internal/**``, or
   ``draft.rst`` work as you would expect from a ``.gitignore`` file.
 
+Both keys, and ``gitignore``, are read **only in directory mode**. A
+file-list mount has no walker — the ``files`` list *is* the selection — so
+setting ``include`` or ``exclude`` on one has no effect at all, and is
+reported as ``mounts.ignored_option``. To filter a tree, use ``dir``.
+
 The override list is **last-match-wins**, which is the one place the
 gitignore intuition misleads: a broad ``exclude`` beats a narrow
 ``include`` regardless of the order the keys appear in the TOML, because
@@ -1014,6 +1020,9 @@ at once), and escalated to a failed build:
      - a file-list entry's name is nothing but a registered suffix (e.g. a
        file called ``.rst``), so it has no docname; the whole mount is
        skipped
+   * - ``mounts.ignored_option``
+     - a file-list mount sets ``include`` or ``exclude``, which only
+       directory mounts read; the keys have no effect
    * - ``mounts.missing_path``
      - a configured ``dir`` / ``files`` path does not exist on disk;
        the whole mount is skipped

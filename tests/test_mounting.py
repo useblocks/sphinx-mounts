@@ -1120,7 +1120,13 @@ def test_intra_mount_basename_collision_warns_and_skips_the_mount(
     assert str(d2 / "notes.rst") in warnings
     # The consequence of the whole-mount skip is spelled out (DP1).
     assert "dropping all 2 files" in warnings
-    assert "include / exclude" in warnings
+    # ...and the remedy is the one that applies to a FILE-LIST mount.
+    # include / exclude are directory-mode patterns and are ignored here, so
+    # offering them would describe an action with no effect.
+    assert "remove one of the two entries from the mount's `files` list" in warnings, (
+        warnings
+    )
+    assert "include / exclude" not in warnings, warnings
     assert count_warnings(app) == 1, warnings
     assert count_mount_warnings(app) == 1
     # Whole-mount skip: neither document was mounted.
@@ -1170,6 +1176,10 @@ def test_intra_mount_suffix_collision_warns_and_skips_the_mount(
     assert "'_g/dm/index'" in warnings
     assert str(bundle / "index.md") in warnings
     assert str(bundle / "index.rst") in warnings
+    # A directory mount DOES have a walker, so include / exclude is the right
+    # remedy to offer here.
+    assert "include / exclude" in warnings, warnings
+    assert "`files` list" not in warnings, warnings
     assert count_warnings(app) == 1, warnings
     assert count_mount_warnings(app) == 1
     assert not (Path(app.outdir) / "_g/dm/index.html").exists()
@@ -1178,10 +1188,11 @@ def test_intra_mount_suffix_collision_warns_and_skips_the_mount(
 def test_single_entry_conflict_message_uses_singular_file(
     make_app, make_host_project, bundle_simple, tmp_path
 ):
-    """The dropped-count phrasing must agree in number for a one-file mount.
+    """The dropped-count phrasing must read naturally for a one-file mount.
 
-    Edge case on the DP1 consequence text: a mount that provides exactly one
-    file should read "1 file", not "1 files".
+    Edge case on the DP1 consequence text. "dropping all 1 file it provides"
+    agrees in number but reads like a formatting bug, so a one-file mount gets
+    its own wording.
     """
     solo = tmp_path / "solo"
     solo.mkdir()
@@ -1201,7 +1212,8 @@ def test_single_entry_conflict_message_uses_singular_file(
     app.build()
 
     warnings = app._warning.getvalue()
-    assert "dropping all 1 file it provides" in warnings, warnings
+    assert "dropping the only file it provides" in warnings, warnings
+    assert "dropping all 1 file" not in warnings, warnings
     assert "mount_at" in warnings  # the remedy for a host/earlier-mount clash
 
 
@@ -1260,6 +1272,108 @@ def test_root_mounted_suffix_only_file_does_not_write_a_dotfile_page(
     assert "mounts.empty_docname" in app._warning.getvalue()
     assert "" not in app.env.project.docnames
     assert not (Path(app.outdir) / ".html").exists()
+
+
+def test_include_on_a_file_list_mount_warns_that_it_is_ignored(
+    make_app, make_host_project, tmp_path
+):
+    """``include`` / ``exclude`` on a file-list mount must not be silent.
+
+    They are gitignore-style patterns for the directory walker, and a
+    file-list mount has none — the ``files`` list is the selection. So
+    ``include = ["one.rst"]`` on a two-file mount still mounts both files, and
+    nothing said so. Every other contradictory key combination in this
+    extension is rejected at config time; this one silently did nothing.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "one.rst").write_text(":orphan:\n\nOne\n===\n", encoding="utf-8")
+    (pkg / "two.rst").write_text(":orphan:\n\nTwo\n===\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "files": [str(pkg / "one.rst"), str(pkg / "two.rst")],
+                "mount_at": "_g/m",
+                "include": ["one.rst"],
+            }
+        ],
+    )
+    _set_index_rst(host, "Host\n====\n\nNo dangling references.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    warnings = app._warning.getvalue()
+    assert "mounts.ignored_option" in warnings, warnings
+    assert "include" in warnings, warnings
+    assert count_mount_warnings(app) == 1, warnings
+    # The filter really had no effect: both files are still mounted. The
+    # warning describes the situation rather than changing it.
+    assert (Path(app.outdir) / "_g" / "m" / "one.html").exists()
+    assert (Path(app.outdir) / "_g" / "m" / "two.html").exists()
+
+
+def test_exclude_on_a_file_list_mount_warns_that_it_is_ignored(
+    make_app, make_host_project, tmp_path
+):
+    """Same for ``exclude``, and both keys at once are named in one warning."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "one.rst").write_text(":orphan:\n\nOne\n===\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "files": [str(pkg / "one.rst")],
+                "mount_at": "_g/m",
+                "include": ["*.rst"],
+                "exclude": ["one.rst"],
+            }
+        ],
+    )
+    _set_index_rst(host, "Host\n====\n\nNo dangling references.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    warnings = app._warning.getvalue()
+    assert "mounts.ignored_option" in warnings, warnings
+    assert "include and exclude" in warnings, warnings
+    assert count_mount_warnings(app) == 1, warnings
+    # `exclude` did not drop the file either.
+    assert (Path(app.outdir) / "_g" / "m" / "one.html").exists()
+
+
+def test_directory_mount_with_include_does_not_warn(
+    make_app, make_host_project, bundle_simple
+):
+    """The complement: a directory mount reads both keys, so setting them must
+    stay silent."""
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "dir": str(bundle_simple),
+                "mount_at": "_g/m",
+                "include": ["**/*.rst"],
+                "exclude": ["details.rst"],
+            }
+        ],
+    )
+    _replace_index_toctree(host, "_g/m/index", "_g/m/intro")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    assert count_mount_warnings(app) == 0, app._warning.getvalue()
+    # ...and the patterns genuinely applied.
+    assert not (Path(app.outdir) / "_g" / "m" / "details.html").exists()
 
 
 def test_docname_conflict_warning_is_suppressible(

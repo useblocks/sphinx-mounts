@@ -37,7 +37,15 @@ Unreleased
 - Every ``docname conflict`` message now states how many files the whole-mount
   skip drops, and which knob resolves it. One colliding filename removing a
   whole bundle is a large consequence to report in a single line of a long
-  build log.
+  build log. The remedy is mode-dependent: a file-list mount is told to drop
+  an entry from ``files``, since ``include`` / ``exclude`` would have no
+  effect there.
+
+- ``include`` or ``exclude`` on a **file-list** mount is now reported as
+  ``mounts.ignored_option``. Those keys are patterns for the directory
+  walker, and a file-list mount has none, so they were silently doing
+  nothing — the only contradictory key combination in the extension that was
+  neither rejected nor reported.
 
 - A **file-list mount's ``path_check`` roots are now the union of its listed
   files' directories**, so a reference is in-bundle when it sits under any
