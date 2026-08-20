@@ -22,7 +22,7 @@ from sphinx_mounts.config import (
 from sphinx_mounts.logging import log_warning
 from sphinx_mounts.mounter import (
     DocRoot,
-    _is_within,
+    _is_within_any,
     _MountAwareProject,
     install_mount_aware_project,
 )
@@ -379,13 +379,12 @@ def _on_check_path_confinement(app: Sphinx, env: Any) -> None:  # noqa: ARG001
     for docname, doc_root in doc_roots.items():
         if doc_root.path_check == "off":
             continue
-        resolved_root = doc_root.root.resolve()
         for dep in env.dependencies.get(docname, ()):
             abs_dep = (srcdir / dep).resolve()
-            if _is_within(resolved_root, abs_dep):
+            if _is_within_any(doc_root.roots, abs_dep):
                 continue
             msg = _path_escape_message(
-                docname, dep, abs_dep, resolved_root, doc_root.label
+                docname, dep, abs_dep, doc_root.roots, doc_root.label
             )
             if doc_root.path_check == "error":
                 # Log the actionable line FIRST. On Sphinx >= 8.2 every
@@ -406,7 +405,7 @@ def _on_check_path_confinement(app: Sphinx, env: Any) -> None:  # noqa: ARG001
 
 
 def _path_escape_message(
-    docname: str, dep: Any, abs_dep: Path, resolved_root: Path, label: str
+    docname: str, dep: Any, abs_dep: Path, roots: tuple[Path, ...], label: str
 ) -> str:
     """Compose the ``path_check`` message for one escaping dependency.
 
@@ -425,11 +424,20 @@ def _path_escape_message(
     ``label`` names the *mount* whose ``path_check`` fired. "The bundle root"
     on its own is ambiguous in a project with several mounts, and it is the
     mount's config block that has to change.
+
+    A file-list mount has one root per listed file's directory, so every one
+    of them is printed: the author needs to see the whole set they could move
+    the file into, not just one arbitrary member of it.
     """
+    if len(roots) == 1:
+        where = f"which is not under {roots[0]}"
+    else:
+        listed = ", ".join(str(root) for root in roots)
+        where = f"which is not under any of this mount's roots ({listed})"
     return (
         f"sphinx-mounts: mounted doc {docname!r} references a file outside its "
         f"bundle root, which belongs to {label}: the recorded dependency {dep} "
-        f"resolves to {abs_dep}, which is not under {resolved_root}. Mounted "
+        f"resolves to {abs_dep}, {where}. Mounted "
         f"bundles must be self-contained — use a path relative to the bundle "
         f"root (no leading '/', and no '..' climbing above the bundle). A "
         f"symlink pointing out of the bundle counts as an escape too, even "

@@ -31,7 +31,7 @@ from sphinx_mounts.config import MountConfig, mount_label
 from sphinx_mounts.logging import log_warning
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +39,61 @@ logger = logging.getLogger(__name__)
 class DocRoot(NamedTuple):
     """What the path-confinement check needs to know about one mounted doc.
 
-    :param root: The bundle root the doc's file references must stay under.
+    :param roots: The directories the doc's file references must stay inside.
+        A directory mount contributes exactly one (its ``dir``); a file-list
+        mount contributes the parent directory of every listed file, and a
+        reference is in-bundle if it is under **any** of them. All are
+        already resolved — see :func:`_dir_root` and :func:`_listed_roots`.
     :param path_check: The owning mount's ``path_check`` mode.
     :param label: The owning mount's :func:`mount_label`, so a message about
         an escape can name the mount that has to be fixed rather than
         speaking of "the bundle root" in the abstract.
     """
 
-    root: Path
+    roots: tuple[Path, ...]
     path_check: str
     label: str
+
+
+def _dir_root(mount_dir: Path) -> tuple[Path, ...]:
+    """The confinement root set of a directory mount: just ``dir`` itself."""
+    return (mount_dir.resolve(),)
+
+
+def _listed_roots(files: Iterable[Path]) -> tuple[Path, ...]:
+    """The confinement root set of a file-list mount.
+
+    Every listed file contributes its own parent directory, and a reference is
+    in-bundle if it lives under **any** of them. Duplicates are collapsed
+    (several files in one directory contribute one root) and order is
+    preserved, so diagnostics list the roots in ``files`` order.
+
+    This is the *union* of the directories the user actually named. Two
+    alternatives were tried and are both wrong:
+
+    * one root per *document* — each listed file confined to its own parent —
+      made the verdict depend on how deep a file happened to sit. A reference
+      from ``index.rst`` down into ``notes/`` passed while the mirror-image
+      reference from ``notes/2026-q1.rst`` up to a shared ``../shared.txt``
+      was rejected, in the same mount and the same tree.
+    * the *common ancestor* of the listed parents. That fixes the asymmetry
+      but is unbounded in the other direction: the user's ``files`` list
+      drives the root arbitrarily wide. Two files in sibling subtrees make
+      their shared parent the root, and two files on genuinely disjoint
+      branches make it the filesystem root — at which point ``path_check``
+      silently permits every file on the machine, with no diagnostic,
+      including at its default ``"error"``.
+
+    The union has neither problem. It is a strict superset of the per-document
+    rule, so the asymmetry stays fixed, and a strict subset of the common
+    ancestor, so it can never admit a directory the user did not name.
+    """
+    return tuple(dict.fromkeys(f.parent.resolve() for f in files))
+
+
+def _is_within_any(roots: Iterable[Path], candidate: Path) -> bool:
+    """Whether ``candidate`` is inside (or equal to) at least one root."""
+    return any(_is_within(root, candidate) for root in roots)
 
 
 def _is_within(root: Path, candidate: Path) -> bool:
@@ -305,14 +350,14 @@ def _attach_mount_dir(
         matched.append((p, suffix))
     matched.sort(key=lambda pair: pair[0].as_posix())
 
-    entries: list[tuple[str, Path, Path]] = []
+    entries: list[tuple[str, Path]] = []
     for abs_path, suffix in matched:
         rel_path = abs_path.relative_to(mount_dir)
         # Strip the matched suffix (which may be multi-dot like ".rst.txt").
         docname_tail = rel_path.as_posix()[: -len(suffix)]
         docname = _join_mount(mount.mount_at, docname_tail)
-        entries.append((docname, abs_path, mount_dir))
-    return _attach_entries(project, mount, entries, index)
+        entries.append((docname, abs_path))
+    return _attach_entries(project, mount, entries, _dir_root(mount_dir), index)
 
 
 def _build_walker(
@@ -370,12 +415,12 @@ def _attach_mount_files(
     """Mount an explicit list of files under ``mount.mount_at``.
 
     Every listed file's basename (minus the matched suffix) becomes a docname
-    tail, so the result is a flat namespace. All of them share a *single*
-    confinement root — see :func:`_files_bundle_root`.
+    tail, so the result is a flat namespace. All of them share the mount's
+    confinement root *set* — see :func:`_listed_roots`.
     """
     suffixes = tuple(project.source_suffix)
     listed = list(files)
-    resolved: list[tuple[str, Path]] = []
+    entries: list[tuple[str, Path]] = []
     for abs_path in listed:
         if not abs_path.is_file():
             msg = (
@@ -411,61 +456,19 @@ def _attach_mount_files(
             )
             log_warning(logger, msg, "empty_docname")
             return []
-        resolved.append((_join_mount(mount.mount_at, docname_tail), abs_path))
+        entries.append((_join_mount(mount.mount_at, docname_tail), abs_path))
 
-    root = _files_bundle_root(listed, mount, index)
-    entries = [
-        (docname, abs_path, root if root is not None else abs_path.parent)
-        for docname, abs_path in resolved
-    ]
-    return _attach_entries(project, mount, entries, index)
-
-
-def _files_bundle_root(
-    files: Sequence[Path], mount: MountConfig, index: int
-) -> Path | None:
-    """The single confinement root for a file-list mount.
-
-    A file-list mount is one bundle, so it gets one root: the common ancestor
-    of every listed file's parent directory. Using each file's own parent
-    instead gave the mount N roots and made the ``path_check`` verdict depend
-    on how deep in the tree a file happened to sit — a reference from
-    ``index.rst`` *down* into ``notes/`` passed, while the mirror-image
-    reference from ``notes/2026-q1.rst`` *up* to a shared ``../shared.txt``
-    was rejected as leaving "the bundle root", in the same mount and the same
-    tree.
-
-    :return: The common ancestor, or ``None`` when it cannot be computed —
-        which happens when the listed files do not share a filesystem root
-        at all (different Windows drives, or a UNC path beside a drive
-        letter). That is reported as ``mounts.ambiguous_root`` and the caller
-        falls back to per-file parents for this mount: a mount spread across
-        two drives has no meaningful single root, and refusing to build at
-        all would be a worse answer than the previous behaviour.
-    """
-    parents = [f.parent for f in files]
-    try:
-        return Path(os.path.commonpath(parents))
-    except ValueError:
-        msg = (
-            f"sphinx-mounts: {mount_label(mount, index)} lists files with no "
-            f"common parent directory, so the mount has no single bundle "
-            f"root; path_check falls back to treating each listed file's own "
-            f"directory as its root. Move the files under one directory, or "
-            f"split them into separate mounts, to get a predictable "
-            f"path_check verdict."
-        )
-        log_warning(logger, msg, "ambiguous_root")
-        return None
+    return _attach_entries(project, mount, entries, _listed_roots(listed), index)
 
 
 def _attach_entries(
     project: _MountAwareProject,
     mount: MountConfig,
-    entries: list[tuple[str, Path, Path]],
+    entries: list[tuple[str, Path]],
+    roots: tuple[Path, ...],
     index: int,
 ) -> list[str]:
-    """Register a mount's ``(docname, abs_path, root)`` entries.
+    """Register a mount's ``(docname, abs_path)`` entries.
 
     Every docname is checked for collisions **before** anything is
     registered, against two sets:
@@ -494,14 +497,16 @@ def _attach_entries(
 
     :param project: The Sphinx :class:`Project` to inject into.
     :param mount: The mount these entries belong to.
-    :param entries: ``(docname, abs_path, path_check_root)`` triples.
+    :param entries: ``(docname, abs_path)`` pairs, in enumeration order.
+    :param roots: The mount's confinement root set, shared by every entry —
+        one check for the whole mount rather than one per document.
     :param index: The mount's position in the ``mounts`` config list,
         used in the warning's :func:`mount_label`.
     :return: The docnames actually registered (``[]`` when the whole
         mount was skipped).
     """
     seen: dict[str, Path] = {}
-    for docname, abs_path, _root in entries:
+    for docname, abs_path in entries:
         if docname in project.docnames:
             existing = project._docname_to_path.get(docname)
             msg = (
@@ -528,20 +533,19 @@ def _attach_entries(
             return []
         seen[docname] = abs_path
     added: list[str] = []
-    for docname, abs_path, root in entries:
+    doc_root = DocRoot(roots, mount.path_check, mount_label(mount, index))
+    for docname, abs_path in entries:
         project.docnames.add(docname)
         path_key = _PathKey(abs_path)
         project._docname_to_path[docname] = path_key
         project._path_to_docname[path_key] = docname
-        project._doc_roots[docname] = DocRoot(
-            root, mount.path_check, mount_label(mount, index)
-        )
+        project._doc_roots[docname] = doc_root
         added.append(docname)
         logger.debug("sphinx-mounts: mounted %s -> %s", docname, abs_path)
     return added
 
 
-def _skip_consequence(entries: list[tuple[str, Path, Path]]) -> str:
+def _skip_consequence(entries: list[tuple[str, Path]]) -> str:
     """Spell out what skipping the whole mount costs, for a warning message.
 
     One colliding filename removes the *entire* bundle from the build, which

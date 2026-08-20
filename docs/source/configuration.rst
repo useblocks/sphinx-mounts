@@ -809,16 +809,30 @@ against the document's own location. For a mounted doc, that location is
 the bundle on disk, so a relative reference resolves *inside the bundle*,
 exactly as it would when the bundle is built standalone.
 
-**What the bundle root is.** In directory mode it is ``dir``. In file-list
-mode it is the **common ancestor** of every listed file's parent
-directory: a file-list mount is one bundle, so it gets one root. That is
-what lets a listed file reference something beside a *sibling* listed file
-— for example a mount listing ``index.rst`` and ``notes/2026-q1.rst``
-spans the whole tree, so ``notes/2026-q1.rst`` may reference
-``../shared.txt``. If the listed files share no filesystem root at all
-(different Windows drives, say), there is no single root to compute:
-``mounts.ambiguous_root`` is reported and each file falls back to its own
-directory.
+**What the bundle root is.** In directory mode it is ``dir`` — one root.
+In file-list mode the mount has one root **per listed file**: the parent
+directory of each entry in ``files``. A reference is inside the bundle when
+it is under **any** of them.
+
+That union is deliberately bounded on both sides:
+
+- It is wide enough to fix the asymmetry a per-*document* rule had. A mount
+  listing ``rn/index.rst`` and ``rn/notes/2026-q1.rst`` has the roots
+  ``rn/`` and ``rn/notes/``, so ``notes/2026-q1.rst`` may reference
+  ``../shared.txt`` — that file is under ``rn/``, a directory the mount
+  named. Confining each document to its own parent instead made the verdict
+  depend on how deep a file happened to sit: the reference *down* from
+  ``index.rst`` into ``notes/`` passed while the mirror-image reference *up*
+  from ``notes/2026-q1.rst`` was rejected.
+- It is narrow enough that it can never admit a directory you did not name.
+  In particular it is **not** the common ancestor of the listed files. An
+  ancestor is driven arbitrarily wide by the ``files`` list itself: two
+  entries in sibling subtrees would make their shared parent the root, and
+  two entries on unrelated filesystem branches would make it ``/`` — at
+  which point ``path_check`` permits every file on the machine.
+
+So listing files from unrelated trees widens the bundle by exactly those
+trees' directories, and nothing else.
 
 Bundle roots are always **resolved** (symlinks followed) before
 comparison, and so are the references being checked, so a bundle reached
@@ -990,10 +1004,6 @@ at once), and escalated to a failed build:
 
    * - Warning type
      - Meaning
-   * - ``mounts.ambiguous_root``
-     - a file-list mount's files share no common parent directory, so the
-       mount has no single bundle root; ``path_check`` falls back to each
-       file's own directory
    * - ``mounts.attach_to_missing``
      - ``attach_to`` references a docname that does not exist
    * - ``mounts.docname_conflict``

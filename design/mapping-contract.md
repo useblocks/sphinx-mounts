@@ -276,7 +276,6 @@ or repurposed without a breaking release.
 
 | Subtype | Condition | Effect |
 | --- | --- | --- |
-| `mounts.ambiguous_root` | a file-list mount's files share no common parent directory | per-file roots used for `path_check` |
 | `mounts.attach_to_missing` | `attach_to` names a docname that does not exist | nothing wired |
 | `mounts.docname_conflict` | collision per rules 1-3 above | whole mount skipped |
 | `mounts.empty_docname` | a listed file's name is only a suffix | whole mount skipped |
@@ -316,22 +315,45 @@ They are hard errors and are deliberately not suppressible.
 
 ## 9. Path confinement (`path_check`)
 
-Each mounted document has exactly one **bundle root**:
+Each mount has a **root set**, shared by every document it provides:
 
-| Mode | Bundle root |
+| Mode | Root set |
 | --- | --- |
-| directory | the resolved `dir` |
-| file-list | the **common ancestor** of every listed file's resolved parent directory |
+| directory | exactly one root: the resolved `dir` |
+| file-list | one root per entry in `files`: that entry's resolved parent directory (duplicates collapsed, `files` order preserved) |
 
-A file-list mount is one bundle, so it gets one root.
-Using each file's own parent instead would make the verdict depend on how deep a
-file sits, and would reject a reference between two files of the same mount.
-When the listed files share no filesystem root at all — different Windows drives,
-or a UNC path beside a drive letter — there is no single root:
-`mounts.ambiguous_root` is reported and each file falls back to its own parent.
+A dependency is inside the bundle iff it is under — or equal to — **at least
+one** root of its document's mount.
+There is one check per mount, not one per document.
 
-Every file the document is recorded as depending on must resolve to the bundle
-root or somewhere beneath it.
+**The bound is normative, and it is bounded on both sides.**
+Two other rules were implemented and are both wrong; a second reader must
+implement neither.
+
+- *One root per document* (each listed file confined to its own parent) makes
+  the verdict depend on how deep a file happens to sit.
+  With `rn/index.rst` and `rn/notes/2026-q1.rst` listed, the reference *down*
+  from `index.rst` into `notes/` passes while the mirror-image reference *up*
+  from `notes/2026-q1.rst` to `../shared.txt` is rejected — same mount, same
+  tree, opposite verdicts.
+- *The common ancestor of the listed parents* fixes that asymmetry but is
+  unbounded in the other direction, because the `files` list itself drives the
+  root.
+  Two entries in sibling subtrees promote their shared parent to the root; two
+  entries on unrelated filesystem branches promote `/`, at which point the
+  check permits every file on the machine and emits nothing — including at the
+  default `path_check = "error"`.
+
+The union of the listed parents is a strict superset of the first rule (so the
+asymmetry stays fixed) and a strict subset of the second (so no directory the
+user did not name is ever admitted).
+Listing files from unrelated trees widens the bundle by exactly those trees'
+directories, and by nothing else.
+There is no failure case to report: a set of one or more parents always exists,
+so no diagnostic accompanies root computation.
+
+Every file the document is recorded as depending on must resolve into that root
+set.
 The comparison is per path component, on both sides passed through the platform's
 case normalisation, because resolving a path does not fold case and both macOS and
 Windows are case-insensitive but case-preserving.
@@ -342,7 +364,7 @@ Three shapes escape:
 
 1. a leading `/`, which means "absolute from the source root" and for a mounted
    document is the **host** source directory, not the bundle;
-2. a `..` climb above the bundle root;
+2. a `..` climb that lands outside every root in the set;
 3. a symlink inside the bundle whose target is outside it — the written path looks
    local, and only its resolved form reveals the escape.
 

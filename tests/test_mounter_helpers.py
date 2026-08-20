@@ -10,9 +10,10 @@ from sphinx.project import Project
 
 from sphinx_mounts.config import MountConfig
 from sphinx_mounts.mounter import (
-    _files_bundle_root,
     _is_within,
+    _is_within_any,
     _join_mount,
+    _listed_roots,
     install_mount_aware_project,
 )
 
@@ -89,46 +90,78 @@ class TestIsWithin:
         assert not _is_within(Path("/x/Bundle"), Path("/x/bundle/page.rst"))
 
 
-class TestFilesBundleRoot:
-    """The single confinement root of a file-list mount."""
-
-    @staticmethod
-    def _mount(*files: str) -> MountConfig:
-        return MountConfig(files=tuple(Path(f) for f in files), mount_at="_g/m")
+class TestListedRoots:
+    """The confinement root SET of a file-list mount."""
 
     def test_single_file_root_is_its_parent(self) -> None:
-        files = [Path("/rn/index.rst")]
-        assert _files_bundle_root(files, self._mount("/rn/index.rst"), 0) == Path("/rn")
+        assert _listed_roots([Path("/rn/index.rst")]) == (Path("/rn"),)
 
-    def test_common_ancestor_of_files_at_different_depths(self) -> None:
-        files = [Path("/rn/index.rst"), Path("/rn/notes/2026-q1.rst")]
-        mount = self._mount("/rn/index.rst", "/rn/notes/2026-q1.rst")
-        assert _files_bundle_root(files, mount, 0) == Path("/rn")
+    def test_files_at_different_depths_contribute_both_parents(self) -> None:
+        """The deeper file's own directory AND the shallower one are roots, so
+        a reference from the deeper document up into the shallower directory is
+        in-bundle. That is the asymmetry the union rule exists to fix."""
+        assert _listed_roots(
+            [Path("/rn/index.rst"), Path("/rn/notes/2026-q1.rst")]
+        ) == (Path("/rn"), Path("/rn/notes"))
 
-    def test_common_ancestor_of_sibling_directories(self) -> None:
-        files = [Path("/pkg/a/one.rst"), Path("/pkg/b/two.rst")]
-        mount = self._mount("/pkg/a/one.rst", "/pkg/b/two.rst")
-        assert _files_bundle_root(files, mount, 0) == Path("/pkg")
+    def test_sibling_directories_do_not_promote_their_shared_parent(self) -> None:
+        """The bound that matters: listing `/pkg/a/one.rst` and `/pkg/b/two.rst`
+        makes `/pkg/a` and `/pkg/b` roots — NOT `/pkg`.
 
-    def test_identical_parents_collapse_to_that_parent(self) -> None:
-        files = [Path("/pkg/one.rst"), Path("/pkg/two.rst")]
-        mount = self._mount("/pkg/one.rst", "/pkg/two.rst")
-        assert _files_bundle_root(files, mount, 0) == Path("/pkg")
-
-    def test_no_common_ancestor_returns_none(self) -> None:
-        """Files that share no filesystem root (different Windows drives, or a
-        UNC path beside a drive letter) have no meaningful single root.
-        ``os.path.commonpath`` raises ``ValueError``; the helper must report it
-        and hand back ``None`` so the caller can fall back to per-file parents
-        rather than crashing the build.
-
-        A relative path beside an absolute one triggers the same
-        ``ValueError`` on every platform, which is what makes this testable on
-        POSIX at all.
+        The common ancestor would be `/pkg`, which the user never named, and
+        everything else under it would silently become in-bundle. With two
+        entries on unrelated filesystem branches the ancestor would be `/`,
+        turning the default ``path_check = "error"`` into a no-op.
         """
-        files = [Path("/abs/one.rst"), Path("rel/two.rst")]
-        mount = self._mount("/abs/one.rst", "rel/two.rst")
-        assert _files_bundle_root(files, mount, 0) is None
+        roots = _listed_roots([Path("/pkg/a/one.rst"), Path("/pkg/b/two.rst")])
+        assert roots == (Path("/pkg/a"), Path("/pkg/b"))
+        assert Path("/pkg") not in roots
+
+    def test_identical_parents_collapse_to_one_root(self) -> None:
+        assert _listed_roots([Path("/pkg/one.rst"), Path("/pkg/two.rst")]) == (
+            Path("/pkg"),
+        )
+
+    def test_order_follows_the_files_list(self) -> None:
+        """Roots are reported in ``files`` order so diagnostics are stable."""
+        assert _listed_roots([Path("/z/one.rst"), Path("/a/two.rst")]) == (
+            Path("/z"),
+            Path("/a"),
+        )
+
+    def test_disjoint_branches_stay_disjoint(self) -> None:
+        """Unrelated branches contribute exactly themselves. No ancestor is
+        computed, so there is no ``ValueError`` case and no fallback to
+        report — the previous implementation needed both."""
+        assert _listed_roots([Path("/opt/a/one.rst"), Path("/var/b/two.rst")]) == (
+            Path("/opt/a"),
+            Path("/var/b"),
+        )
+
+
+class TestIsWithinAny:
+    """One containment check against a whole mount's root set."""
+
+    def test_matches_the_first_root(self) -> None:
+        assert _is_within_any([Path("/a"), Path("/b")], Path("/a/page.rst"))
+
+    def test_matches_a_later_root(self) -> None:
+        assert _is_within_any([Path("/a"), Path("/b")], Path("/b/deep/page.rst"))
+
+    def test_root_itself_is_within(self) -> None:
+        assert _is_within_any([Path("/a"), Path("/b")], Path("/b"))
+
+    def test_outside_every_root_is_not_within(self) -> None:
+        assert not _is_within_any([Path("/a"), Path("/b")], Path("/c/page.rst"))
+
+    def test_the_shared_parent_of_the_roots_is_not_within(self) -> None:
+        """The union must not admit the roots' common ancestor."""
+        assert not _is_within_any(
+            [Path("/pkg/a"), Path("/pkg/b")], Path("/pkg/secret.txt")
+        )
+
+    def test_empty_root_set_admits_nothing(self) -> None:
+        assert not _is_within_any([], Path("/a/page.rst"))
 
 
 class TestInstallMountAwareProject:

@@ -115,22 +115,26 @@ def test_doc_roots_records_bundle_root_and_path_check(
     app = _build(make_app, host)
 
     recorded = app.env.project._doc_roots["_g/api/index"]
-    assert recorded.root == bundle.resolve()
+    # A directory mount has exactly one root: its own dir.
+    assert recorded.roots == (bundle.resolve(),)
     assert recorded.path_check == "error"
-    # The mount's label travels with the root so an escape message can name
+    # The mount's label travels with the roots so an escape message can name
     # the mount whose config has to change.
     assert recorded.label == f"mounts[0] (dir={bundle.resolve()})"
 
 
-def test_doc_roots_files_mode_uses_the_listed_files_common_ancestor(
+def test_doc_roots_files_mode_uses_the_union_of_listed_parents(
     make_app, make_host_project, tmp_path
 ):
-    """A file-list mount is ONE bundle, so it gets ONE confinement root: the
-    common ancestor of every listed file's parent directory.
+    """A file-list mount's root SET is the parent directory of every listed
+    file, and every document of the mount shares the whole set.
 
-    Recording each file's own parent gave a single mount N roots, which made
-    the ``path_check`` verdict depend on how deep a file sat in the tree —
-    see ``test_files_mode_sibling_reference_within_common_ancestor_is_allowed``.
+    Confining each document to its own file's parent made the ``path_check``
+    verdict depend on how deep a file sat — see
+    ``test_files_mode_sibling_reference_within_the_mounts_roots_is_allowed``.
+    Collapsing to the listed files' common ancestor fixed that but admitted
+    directories the mount never named — see
+    ``test_files_mode_reference_into_the_unlisted_shared_parent_is_flagged``.
     """
     pkg = tmp_path / "pkg"
     (pkg / "notes").mkdir(parents=True)
@@ -153,18 +157,19 @@ def test_doc_roots_files_mode_uses_the_listed_files_common_ancestor(
     app = _build(make_app, host)
 
     roots = app.env.project._doc_roots
-    # Both docs share the one root, even though their own parents differ.
-    assert roots["_g/api/index"].root == pkg.resolve()
-    assert roots["_g/api/page"].root == pkg.resolve()
+    expected = (pkg.resolve(), (pkg / "notes").resolve())
+    # Both docs carry the whole set, in ``files`` order.
+    assert roots["_g/api/index"].roots == expected
+    assert roots["_g/api/page"].roots == expected
     assert roots["_g/api/page"].path_check == "warn"
 
 
 def test_doc_roots_single_file_mount_root_is_its_parent(
     make_app, make_host_project, tmp_path
 ):
-    """Edge case of the common-ancestor rule: with one listed file the common
-    ancestor is simply that file's parent directory, i.e. the behaviour a
-    single-file mount always had."""
+    """Edge case of the union rule: one listed file contributes exactly one
+    root, its own parent directory — the behaviour a single-file mount always
+    had."""
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "page.rst").write_text("Page\n====\n", encoding="utf-8")
@@ -185,7 +190,7 @@ def test_doc_roots_single_file_mount_root_is_its_parent(
     app = _build(make_app, host)
 
     recorded = app.env.project._doc_roots["_g/api/page"]
-    assert recorded.root == pkg.resolve()
+    assert recorded.roots == (pkg.resolve(),)
     assert recorded.path_check == "warn"
 
 
@@ -688,7 +693,7 @@ def test_files_mode_escape_fails(make_app, make_host_project, tmp_path):
         app.build()
 
 
-def test_files_mode_sibling_reference_within_common_ancestor_is_allowed(
+def test_files_mode_sibling_reference_within_the_mounts_roots_is_allowed(
     make_app, make_host_project, tmp_path
 ):
     """A deeper listed file may reference a file that sits inside the mount's
@@ -731,11 +736,105 @@ def test_files_mode_sibling_reference_within_common_ancestor_is_allowed(
     assert "SHARED_TEXT" in html
 
 
-def test_files_mode_escape_above_common_ancestor_still_fails(
+def test_files_mode_reference_into_the_unlisted_shared_parent_is_flagged(
     make_app, make_host_project, tmp_path
 ):
-    """Widening the root to the common ancestor must not disable the check: a
-    reference that climbs above that ancestor is still an escape."""
+    """A directory the mount never named must NOT become in-bundle, even when
+    it is the shared parent of two listed files.
+
+    This is the bound on the widening. Collapsing a file-list mount to the
+    *common ancestor* of its listed files let the ``files`` list drive the root
+    arbitrarily wide: two entries in sibling subtrees promoted their shared
+    parent, so every file under it — here ``secret.txt``, which sits in
+    neither listed directory — became reachable with no diagnostic at all, at
+    the default ``path_check = "error"``. Entries on unrelated filesystem
+    branches promoted the root to ``/``, permitting the whole machine.
+
+    The union of the listed parents has no such hole: ``treeA/d1`` and
+    ``treeB/d2`` are roots, their shared parent is not.
+    """
+    (tmp_path / "secret.txt").write_text("SECRET_OUTSIDE_BOTH_DIRS\n", encoding="utf-8")
+    a = tmp_path / "treeA" / "d1"
+    b = tmp_path / "treeB" / "d2"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    (a / "x.rst").write_text(
+        "X\n=\n\n.. literalinclude:: ../../secret.txt\n", encoding="utf-8"
+    )
+    (b / "y.rst").write_text("Y\n=\n\nplain\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [{"files": [str(a / "x.rst"), str(b / "y.rst")], "mount_at": "_g/fl"}],
+    )
+    _replace_index_toctree(host, "_g/fl/x", "_g/fl/y")
+
+    # The default path_check is "error", so this must abort the build.
+    app = make_app(srcdir=host, freshenv=True)
+    with pytest.raises(ExtensionError) as excinfo:
+        app.build()
+
+    message = str(excinfo.value)
+    assert "outside its bundle root" in message, message
+    assert str((tmp_path / "secret.txt").resolve()) in message, message
+    # Both roots are named, so the author can see the set they may move into.
+    assert str(a.resolve()) in message, message
+    assert str(b.resolve()) in message, message
+    # ...and the unlisted shared parent is not presented as a root.
+    assert f"roots ({a.resolve()}, {b.resolve()})" in message, message
+
+
+def test_files_mode_disjoint_branches_do_not_widen_to_the_filesystem_root(
+    make_app, make_host_project, tmp_path
+):
+    """Two listed files with no meaningful shared parent must not make every
+    path on the machine in-bundle.
+
+    The common-ancestor rule promoted the shared parent of the two branches to
+    the sole root, so a third directory beside them became in-bundle. Taken to
+    its extreme with entries on unrelated filesystem branches the computed root
+    was ``/`` and every path on the machine was permitted. Two sibling
+    directories under ``tmp_path`` reproduce the mechanism hermetically.
+    """
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "host_secret.txt").write_text("LEAKED\n", encoding="utf-8")
+    a = tmp_path / "branch_a"
+    b = tmp_path / "branch_b"
+    a.mkdir()
+    b.mkdir()
+    (a / "x.rst").write_text(
+        "X\n=\n\n.. literalinclude:: ../elsewhere/host_secret.txt\n",
+        encoding="utf-8",
+    )
+    (b / "y.rst").write_text("Y\n=\n\nplain\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "files": [str(a / "x.rst"), str(b / "y.rst")],
+                "mount_at": "_g/fl",
+                "path_check": "warn",
+            }
+        ],
+    )
+    _replace_index_toctree(host, "_g/fl/x", "_g/fl/y")
+
+    app = _build(make_app, host)
+
+    warnings = app._warning.getvalue()
+    assert "mounts.path_escape" in warnings, warnings
+    assert count_mount_warnings(app) == 1, warnings
+
+
+def test_files_mode_escape_above_every_root_still_fails(
+    make_app, make_host_project, tmp_path
+):
+    """Widening to a root set must not disable the check: a reference that
+    lands outside every root is still an escape."""
     rn = tmp_path / "rn"
     (rn / "notes").mkdir(parents=True)
     (tmp_path / "above").mkdir()

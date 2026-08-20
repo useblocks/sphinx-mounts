@@ -39,15 +39,18 @@ Unreleased
   whole bundle is a large consequence to report in a single line of a long
   build log.
 
-- A **file-list mount now has one bundle root** for ``path_check``: the common
-  ancestor of the listed files' directories. It previously had one root per
-  listed file, which made the verdict depend on how deep a file sat in the
+- A **file-list mount's ``path_check`` roots are now the union of its listed
+  files' directories**, so a reference is in-bundle when it sits under any
+  directory the mount named. Each document was previously confined to its own
+  file's parent, which made the verdict depend on how deep a file sat in the
   tree — a reference from ``index.rst`` down into ``notes/`` passed, while the
   mirror-image reference from ``notes/2026-q1.rst`` up to a shared
   ``../shared.txt`` was rejected as leaving "the bundle root", in the same
-  mount and the same tree. References that climb above the common ancestor
-  still fail. Listed files that share no filesystem root at all are reported
-  as ``mounts.ambiguous_root`` and fall back to per-file roots.
+  mount and the same tree. The union fixes that without ever admitting a
+  directory that was not named: notably it is *not* the common ancestor of the
+  listed files, which the ``files`` list could drive arbitrarily wide — up to
+  the filesystem root for entries on unrelated branches, silently permitting
+  every file on the machine.
 
 - The ``path_check`` containment comparison now applies the platform's path
   case normalisation. Resolving a path does not fold case, and macOS and
