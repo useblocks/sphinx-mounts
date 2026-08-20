@@ -509,6 +509,23 @@ def setup(app: Sphinx) -> dict[str, Any]:
 
     return {
         "version": __version__,
+        # This extension contributes to the pickled build environment, so it
+        # must declare a version Sphinx can fold into ``env.version``:
+        #
+        # * ``env.project`` is an instance of our own ``_MountAwareProject``
+        #   subclass, so the class reference is in ``environment.pickle`` and
+        #   restoring the cache imports it by name;
+        # * ``env-get-outdated`` persists the toctree-wiring signature as an
+        #   env attribute (``_WIRING_SIGNATURE_ATTR``).
+        #
+        # Sphinx sums every extension's ``env_version`` into the value
+        # ``BuildEnvironment.setup`` compares, so bumping this makes stale
+        # ``.doctrees`` caches start a fresh env instead of being restored
+        # into a shape their writer never produced. Bump it whenever what
+        # this extension puts into the env changes — the pickled shape of
+        # ``_MountAwareProject`` (see its ``__getstate__``) or the layout of
+        # the wiring signature.
+        "env_version": 1,
         "parallel_read_safe": True,
         "parallel_write_safe": True,
     }

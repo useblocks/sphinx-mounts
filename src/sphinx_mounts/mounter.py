@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path, PurePath
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ignore import Walk, WalkBuilder
 from ignore.overrides import OverrideBuilder
@@ -123,6 +123,41 @@ class _MountAwareProject(Project):
         # wiring, which attaches every file rather than only the entry doc.
         # Rebuilt each discover().
         self._mount_entry_docnames: dict[int, list[str]] = {}
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Keep mount state out of ``environment.pickle``.
+
+        ``BuildEnvironment.__getstate__`` clears only its own unpickleable
+        fields, so ``env.project`` — this instance, including its ``_mounts``
+        tuple of :class:`~sphinx_mounts.config.MountConfig` dataclasses —
+        used to be serialised into every user's ``.doctrees`` cache.
+
+        Nothing ever reads it back. ``env.setup()`` calls
+        ``app.project.restore()``, which copies only the three docname/path
+        dictionaries onto the fresh project, and ``builder-inited`` then
+        installs a new ``_MountAwareProject`` built from the *current* parsed
+        mounts, whose ``discover()`` rebuilds all three fields below from
+        scratch. So the pickled state was pure cache weight plus a version
+        coupling: restoring it imports this module's private class names by
+        name, which would turn a rename into a hard failure inside someone
+        else's CI rather than a cache miss.
+
+        The three fields are *emptied* rather than removed from the state.
+        The unpickled instance is handed to ``Project.restore`` before it is
+        discarded, and an emptied field keeps it structurally valid — whereas
+        a missing attribute would make any future read a crash instead of a
+        harmless empty. Emptying is enough for the goal, because the point is
+        to keep this extension's own classes out of the serialised bytes.
+
+        ``env_version`` in :func:`~sphinx_mounts.extension.setup` covers the
+        remainder: the class *reference* for this subclass is still pickled,
+        so a change to what does get serialised needs a version bump.
+        """
+        state = dict(self.__dict__)
+        state["_mounts"] = ()
+        state["_doc_roots"] = {}
+        state["_mount_entry_docnames"] = {}
+        return state
 
     def discover(
         self,

@@ -2391,6 +2391,106 @@ def test_attach_each_rewires_when_the_listed_set_changes(
     assert "_g/m/page_b.html" not in index_html
 
 
+# ---------- env pickle contents ----------
+
+
+def test_setup_declares_an_env_version(make_app, make_host_project, bundle_simple):
+    """The extension puts its own state into the build environment, so it must
+    declare an ``env_version``.
+
+    ``env.project`` is an instance of this extension's own private subclass
+    (so restoring ``.doctrees`` imports that class by name) and the
+    toctree-wiring signature is persisted as an env attribute. Without an
+    ``env_version`` there was nothing to bump when either shape changed, and a
+    stale cache would be restored into a shape its writer never produced.
+
+    The assertion reads ``env.version`` rather than the ``setup()`` return
+    value, because that mapping is what ``BuildEnvironment.setup`` actually
+    compares when deciding whether a cache is current.
+    """
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle_simple), "mount_at": "_g/m"}])
+    _replace_index_toctree(host, "_g/m/index", "_g/m/intro", "_g/m/details")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    assert app.extensions["sphinx_mounts"].metadata["env_version"] == 1
+    assert app.env.version["sphinx_mounts"] == 1
+
+
+def test_env_pickle_carries_no_mount_config_objects(
+    make_app, make_host_project, bundle_simple
+):
+    """``environment.pickle`` must not contain this extension's config objects.
+
+    ``BuildEnvironment.__getstate__`` keeps ``env.project``, so the whole
+    ``_MountAwareProject`` — including its tuple of frozen ``MountConfig``
+    dataclasses, the per-doc roots and the per-mount docname lists — was
+    serialised into every user's ``.doctrees`` cache. All three are rebuilt on
+    each ``discover()``, so this was pure cache weight plus an import-by-name
+    coupling to private class names.
+
+    The byte scan is deliberate: it tests the *serialised artefact* rather
+    than the in-memory object, which is the thing that actually has to survive
+    a version change.
+    """
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle_simple), "mount_at": "_g/m"}])
+    _replace_index_toctree(host, "_g/m/index", "_g/m/intro", "_g/m/details")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    pickled = (Path(app.doctreedir) / "environment.pickle").read_bytes()
+    assert b"MountConfig" not in pickled, (
+        "mount config dataclasses are still serialised into the env pickle"
+    )
+    # The subclass reference itself cannot be removed without a custom
+    # ``__reduce__``; ``env_version`` is what guards a change to it.
+    assert b"_MountAwareProject" in pickled
+
+
+def test_restored_env_still_mounts_correctly(
+    make_app, make_host_project, bundle_simple
+):
+    """A build that restores the pickled env must mount exactly as before.
+
+    This is the check that the trimmed ``__getstate__`` did not break env
+    restore: a second ``SphinxTestApp`` over the same srcdir goes through
+    ``BuildEnvironment.setup`` -> ``app.project.restore(self.project)`` on the
+    unpickled project, before ``builder-inited`` installs a freshly-discovered
+    one. Building in-process twice would not exercise that path at all,
+    because the env object never leaves memory.
+    """
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle_simple), "mount_at": "_g/m"}])
+    _replace_index_toctree(host, "_g/m/index", "_g/m/intro", "_g/m/details")
+
+    first = make_app(srcdir=host, freshenv=True)
+    first.build()
+    assert count_warnings(first) == 0, first._warning.getvalue()
+
+    # freshenv defaults to False, so this one loads environment.pickle.
+    second = make_app(srcdir=host)
+    second.build()
+    # Not ``count_warnings``: building a SECOND app in one process makes
+    # docutils re-register its nodes, directives and roles, which emits dozens
+    # of ``app.add_node`` / ``app.add_directive`` warnings that have nothing to
+    # do with mounting. Assert on the categories this test is about instead.
+    warnings = second._warning.getvalue()
+    assert count_mount_warnings(second) == 0, warnings
+    assert "toc.not_readable" not in warnings, warnings
+    assert "toc.not_included" not in warnings, warnings
+
+    # The mount is fully present, and the paths point at the external files.
+    assert second.env.project.doc2path("_g/m/intro", absolute=True) == (
+        first.env.project.doc2path("_g/m/intro", absolute=True)
+    )
+    html = _read_html(Path(second.outdir), "_g/m/details")
+    assert "BUNDLE_SIMPLE_DETAILS_MARKER" in html
+
+
 # ---------- stored path type ----------
 
 
