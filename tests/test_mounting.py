@@ -1073,6 +1073,138 @@ def test_docname_conflict_warns_and_first_mount_wins(
     assert count_mount_warnings(app) == 1
 
 
+def test_intra_mount_basename_collision_warns_and_skips_the_mount(
+    make_app, make_host_project, tmp_path
+):
+    """Two listed files sharing a basename collide on docname, and that must
+    be reported — not silently resolved by last-one-wins.
+
+    File-list mode flattens the namespace (subdirectories in the paths are
+    dropped), so ``d1/notes.rst`` and ``d2/notes.rst`` both want
+    ``_g/fl/notes``. The pre-check only compared against docnames the *host
+    or an earlier mount* already provided, so two entries of the same mount
+    were invisible to each other: the second registration overwrote the
+    first, one document disappeared with zero diagnostics, and
+    ``_path_to_docname`` stopped being one-to-one.
+    """
+    d1 = tmp_path / "d1"
+    d2 = tmp_path / "d2"
+    d1.mkdir()
+    d2.mkdir()
+    (d1 / "notes.rst").write_text("D1 notes\n========\n\nD1_MARKER\n", encoding="utf-8")
+    (d2 / "notes.rst").write_text("D2 notes\n========\n\nD2_MARKER\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "files": [str(d1 / "notes.rst"), str(d2 / "notes.rst")],
+                "mount_at": "_g/fl",
+            }
+        ],
+    )
+    # The host must not reference the mount, so the skip leaves it clean and
+    # the conflict is the only warning.
+    _set_index_rst(host, "Host\n====\n\nOnly page, no dangling reference.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "mounts.docname_conflict" in warnings
+    assert "'_g/fl/notes'" in warnings
+    # BOTH contributing paths must be named — knowing only one is not
+    # actionable, since either side could be the one to rename.
+    assert str(d1 / "notes.rst") in warnings
+    assert str(d2 / "notes.rst") in warnings
+    # The consequence of the whole-mount skip is spelled out (DP1).
+    assert "dropping all 2 files" in warnings
+    assert "include / exclude" in warnings
+    assert count_warnings(app) == 1, warnings
+    assert count_mount_warnings(app) == 1
+    # Whole-mount skip: neither document was mounted.
+    assert not (Path(app.outdir) / "_g/fl/notes.html").exists()
+
+
+def test_intra_mount_suffix_collision_warns_and_skips_the_mount(
+    make_app, make_host_project, tmp_path
+):
+    """``index.rst`` beside ``index.md`` in one directory mount collides on
+    docname, and must be reported rather than silently resolved.
+
+    Both suffixes are registered (``myst_parser`` is loaded), so discovery
+    strips either one and lands on the same docname. Discovery walks in
+    sorted path order, so ``.md`` registered first and ``.rst`` overwrote it
+    — the Markdown page vanished, with no warning at all. Core Sphinx
+    reports ``multiple files found for the document`` for exactly this
+    situation inside the host srcdir, so a mount used to be strictly less
+    safe than the host project it is grafted onto.
+    """
+    bundle = tmp_path / "dual"
+    bundle.mkdir()
+    (bundle / "index.rst").write_text(
+        "Dir index RST\n=============\n\nRST_VERSION_MARKER\n", encoding="utf-8"
+    )
+    (bundle / "index.md").write_text(
+        "# Dir index MD\n\nMD_VERSION_MARKER\n", encoding="utf-8"
+    )
+
+    host = make_host_project()
+    conf = host / "conf.py"
+    conf.write_text(
+        conf.read_text(encoding="utf-8").replace(
+            'extensions = ["sphinx_mounts"]',
+            'extensions = ["sphinx_mounts", "myst_parser"]',
+        ),
+        encoding="utf-8",
+    )
+    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/dm"}])
+    _set_index_rst(host, "Host\n====\n\nOnly page, no dangling reference.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "mounts.docname_conflict" in warnings
+    assert "'_g/dm/index'" in warnings
+    assert str(bundle / "index.md") in warnings
+    assert str(bundle / "index.rst") in warnings
+    assert count_warnings(app) == 1, warnings
+    assert count_mount_warnings(app) == 1
+    assert not (Path(app.outdir) / "_g/dm/index.html").exists()
+
+
+def test_single_entry_conflict_message_uses_singular_file(
+    make_app, make_host_project, bundle_simple, tmp_path
+):
+    """The dropped-count phrasing must agree in number for a one-file mount.
+
+    Edge case on the DP1 consequence text: a mount that provides exactly one
+    file should read "1 file", not "1 files".
+    """
+    solo = tmp_path / "solo"
+    solo.mkdir()
+    (solo / "index.rst").write_text("Solo\n====\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {"dir": str(bundle_simple), "mount_at": "_g/clash"},
+            {"dir": str(solo), "mount_at": "_g/clash"},
+        ],
+    )
+    _replace_index_toctree(host, "_g/clash/index")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    warnings = app._warning.getvalue()
+    assert "dropping all 1 file it provides" in warnings, warnings
+    assert "mount_at" in warnings  # the remedy for a host/earlier-mount clash
+
+
 def test_docname_conflict_warning_is_suppressible(
     make_app, make_host_project, bundle_simple
 ):

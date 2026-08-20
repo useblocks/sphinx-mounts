@@ -330,14 +330,29 @@ def _attach_entries(
     """Register a mount's ``(docname, abs_path, root)`` entries.
 
     Every docname is checked for collisions **before** anything is
-    registered: if any is already provided by the host project or an
-    earlier mount, the whole mount is skipped with a single
+    registered, against two sets:
+
+    * docnames the host project or an earlier mount already provides —
+      the first provider of a docname wins, so the outcome is
+      deterministic;
+    * docnames *this* mount already produced. Two entries of one mount
+      can collide in both modes: two listed files sharing a basename
+      (file-list mode flattens the namespace), or two files that differ
+      only in registered source suffix, e.g. ``index.rst`` next to
+      ``index.md`` (directory mode strips the suffix). Without this
+      second check the later registration silently overwrote the
+      earlier one, so a document vanished with no diagnostic at all and
+      ``_path_to_docname`` stopped being one-to-one — where core Sphinx
+      reports ``multiple files found for the document``.
+
+    Either collision skips the whole mount with a single
     ``mounts.docname_conflict`` warning. Skipping the whole mount rather
     than the colliding file is deliberate — a partially mounted bundle
     would leave its sibling files dangling (``toc.not_included``) and
     could wire broken toctrees, i.e. modify the host project despite the
-    problem. The first provider of a docname wins, so the outcome is
-    deterministic.
+    problem. Because that is a large consequence for one filename, the
+    warning states how many files the mount would have provided and
+    which knobs resolve it.
 
     :param project: The Sphinx :class:`Project` to inject into.
     :param mount: The mount these entries belong to.
@@ -347,17 +362,33 @@ def _attach_entries(
     :return: The docnames actually registered (``[]`` when the whole
         mount was skipped).
     """
+    seen: dict[str, Path] = {}
     for docname, abs_path, _root in entries:
         if docname in project.docnames:
             existing = project._docname_to_path.get(docname)
             msg = (
                 f"sphinx-mounts: docname conflict for {docname!r}: "
                 f"{mount_label(mount, index)} would supply {abs_path}, "
-                f"but {existing} already provides it — the whole mount "
-                f"is skipped."
+                f"but {existing} already provides it — "
+                f"{_skip_consequence(entries)} Mount the bundle under a "
+                f"different mount_at, or use the mount's include / exclude "
+                f"patterns to leave the colliding file out."
             )
             log_warning(logger, msg, "docname_conflict")
             return []
+        if docname in seen:
+            msg = (
+                f"sphinx-mounts: docname conflict for {docname!r}: "
+                f"{mount_label(mount, index)} maps two of its own files to "
+                f"that docname — {seen[docname]} and {abs_path} — "
+                f"{_skip_consequence(entries)} Rename or drop one of the "
+                f"two files, or use the mount's include / exclude patterns "
+                f"to select just one; changing mount_at does not help, "
+                f"because both files move with it."
+            )
+            log_warning(logger, msg, "docname_conflict")
+            return []
+        seen[docname] = abs_path
     added: list[str] = []
     for docname, abs_path, root in entries:
         project.docnames.add(docname)
@@ -368,6 +399,18 @@ def _attach_entries(
         added.append(docname)
         logger.debug("sphinx-mounts: mounted %s -> %s", docname, abs_path)
     return added
+
+
+def _skip_consequence(entries: list[tuple[str, Path, Path]]) -> str:
+    """Spell out what skipping the whole mount costs, for a warning message.
+
+    One colliding filename removes the *entire* bundle from the build, which
+    can be hundreds of documents. Naming the count keeps that consequence
+    from hiding behind a single line in a long build log.
+    """
+    count = len(entries)
+    files = "file" if count == 1 else "files"
+    return f"the whole mount is skipped, dropping all {count} {files} it provides."
 
 
 def _match_suffix(filename: str, suffixes: Iterable[str]) -> str | None:
