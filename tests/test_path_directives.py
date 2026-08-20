@@ -673,8 +673,8 @@ def test_self_contained_bundle_passes_under_default_error(
 
 
 def test_files_mode_escape_fails(make_app, make_host_project, tmp_path):
-    """In file-list mode the bundle root is the listed files' common ancestor;
-    with a single listed file that is its parent directory, so a ``../``
+    """In file-list mode each listed file contributes its own parent directory
+    as a root; with a single listed file that is the only root, so a ``../``
     reference still escapes."""
     pkg = tmp_path / "pkg"
     pkg.mkdir()
