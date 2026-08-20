@@ -351,6 +351,18 @@ They are hard errors and are deliberately not suppressible.
   they differ. Both directions converge on the build where the change happened,
   without a full rebuild.
 
+  The guarantee is **conditional on the `attach_to` target existing**.
+  The host framework intersects the reported names with the set of documents it
+  found, so a dangling `attach_to` re-reads nothing, no environment is
+  persisted, and the same change is recomputed on every run.
+  A mounted docname referenced only by a *hand-written* host toctree is
+  likewise not covered — nothing marks that host page outdated, so its dead
+  link persists until the page is touched or the cache is discarded.
+  That residue is upstream behaviour, not something mounting introduces
+  (deleting an ordinary host document behaves identically), and a second
+  implementation may reproduce or improve on it, but must not claim the
+  unconditional form.
+
 ## 9. Path confinement (`path_check`)
 
 Each mount has a **root set**, shared by every document it provides:

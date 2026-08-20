@@ -628,9 +628,11 @@ def install_mount_aware_project(
 
     The three fields this subclass owns are excluded (the constructor has
     just set them, and they are per-mount state that has nothing to do with
-    the project being replaced), and the docname/path dictionaries are
-    re-copied afterwards so the new project does not share mutable
-    containers with the old one.
+    the project being replaced), and the three docname/path dictionaries are
+    re-copied afterwards so *those* are not shared. Any other attribute is
+    carried **by reference**, which is safe only because the replaced project
+    is discarded immediately — both ``app.project`` and ``env.project`` are
+    repointed at the new one — so nothing can observe the sharing.
 
     ``vars()`` is read defensively: if a future ``Project`` were to define
     ``__slots__`` it would have no ``__dict__``, and falling back to the

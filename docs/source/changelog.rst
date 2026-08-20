@@ -60,6 +60,15 @@ Unreleased
   the filesystem root for entries on unrelated branches, silently permitting
   every file on the machine.
 
+.. note::
+
+   **For projects that suppressed** ``mounts.path_escape``: the false positive
+   described below (a reference between two files of the same file-list mount)
+   used to be reported with the *same* subtype as a genuine escape, so
+   silencing one silenced both. With the false positive gone, a project that
+   suppressed the subtype to quiet it will start seeing the genuine escapes it
+   was hiding. That is the intended outcome; review the suppression.
+
 - The ``path_check`` containment comparison now applies the platform's path
   case normalisation. Resolving a path does not fold case, and macOS and
   Windows are case-insensitive but case-preserving, so a bundle configured as

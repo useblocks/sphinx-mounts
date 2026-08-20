@@ -118,6 +118,21 @@ Only documents named by an ``attach_to`` are re-read this way, and only
 when that mount's contribution actually changed, so an unrelated bundle
 churning does not drag host pages into the rebuild.
 
+.. important::
+
+   The guarantee covers documents reached through ``attach_to``, and only
+   when the ``attach_to`` target itself exists. A mounted docname that a host
+   page references by **hand** — written into a toctree in the source — is
+   not covered: nothing marks that host page outdated when the mount
+   disappears, so its dead link and the accompanying
+   ``toc.not_readable`` persist until the page is touched or ``-E`` is used.
+
+   That residue is Sphinx's own behaviour, not something mounting
+   introduces: deleting an ordinary host document leaves exactly the same
+   dead link in exactly the same way. If you want the automatic convergence,
+   let ``attach_to`` do the wiring rather than naming mounted docnames by
+   hand.
+
 One consequence is worth knowing, because it looks like the extension
 doing extra work: a build that *only removes* documents used to persist
 nothing at all. Sphinx pickles the environment and runs its consistency

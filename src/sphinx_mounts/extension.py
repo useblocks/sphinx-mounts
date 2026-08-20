@@ -56,10 +56,13 @@ def _on_load_toml(app: Sphinx, config: Config) -> None:
     """Load mount entries from the TOML config file, if present.
 
     Runs on ``config-inited`` *before* :func:`_on_config_inited`. If
-    ``mounts_from_toml`` resolves to an existing file, its top-level
-    ``[[mounts]]`` array replaces any value of ``mounts`` set in
-    ``conf.py``. If the file does not exist, ``config.mounts`` is left
-    untouched and any legacy conf.py-style value is used instead.
+    ``mounts_from_toml`` resolves to an existing file, the mounts array it
+    declares — ``[[source.mounts]]`` or top-level ``[[mounts]]``, see
+    :func:`~sphinx_mounts.config.load_mounts_from_toml` for the two spellings
+    and the rule against declaring both — replaces any value of ``mounts``
+    set in ``conf.py``. If the file does not exist, or declares no mounts
+    array at all, ``config.mounts`` is left untouched and any legacy
+    conf.py-style value is used instead.
     """
     toml_setting = getattr(config, "mounts_from_toml", None)
     if not toml_setting:

@@ -425,10 +425,27 @@ Two things to keep in mind. Declaration order does not matter for
 wiring — the injection happens while each document is read, not while
 the config is parsed — but it *does* decide which mount wins a
 :ref:`docname conflict <mount-semantics>`, since the first provider of a
-docname keeps it. And if the outer mount is skipped or absent, the inner
-mount's ``attach_to`` target does not exist, which is reported as
-``mounts.attach_to_missing``; the inner bundle is still mounted, just not
-referenced from anywhere.
+docname keeps it.
+
+.. warning::
+
+   If the outer mount is skipped or absent — the normal state of a bundle
+   whose upstream build has not run — the inner mount's ``attach_to`` target
+   does not exist. The inner bundle is still mounted, just not referenced
+   from anywhere, and that costs **N + 1 warnings**: one
+   ``mounts.attach_to_missing``, plus one ``toc.not_included`` for *every*
+   file of the inner bundle. Under ``sphinx-build -W`` a composed-mounts
+   layout therefore fails whenever the outer bundle is missing.
+
+   Unlike the out-of-range ``toctree_index`` case, the extension cannot
+   collapse this to a single warning by marking the docs as orphans: Sphinx
+   emits the ``toc.not_included`` warnings inside ``check_consistency()``
+   *before* it fires the ``env-check-consistency`` event this extension
+   listens on, so by the time the missing target is known the warnings have
+   already been reported. (The ``toctree_index`` path can do it because it
+   runs during the read phase.) Either add ``:orphan:`` to the inner
+   bundle's files, or expect N + 1 warnings while the outer bundle is
+   absent.
 
 Picking a specific toctree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -906,13 +923,22 @@ sandbox on what gets read.
 **It is not evaluated on a build that reads nothing.** Sphinx runs the
 consistency checks only when at least one document was read
 (``if updated_docnames:`` in its builder), so an unchanged re-run prints
-``no targets are out of date`` and skips them. A second ``sphinx-build``
-over an untouched tree therefore reports success even for a project the
-previous run flagged — so make the *first* build the gate in CI, and use
-``-E`` (or a clean output directory) if a run has to be self-contained.
+``no targets are out of date`` and skips them. What that means for a second
+build depends on the mode:
+
+- With ``path_check = "warn"``, a re-run over an untouched tree is
+  **silent** — it reports success for a project the previous run flagged. So
+  make the *first* build the CI gate, and use ``-E`` (or a clean output
+  directory) if a run has to be self-contained.
+- With the default ``"error"`` there is nothing to slip through: the raised
+  error propagates out of the build, and Sphinx deletes the cached
+  environment on its way out. Every subsequent run therefore starts from a
+  fresh environment, reads everything, and fires the check again. The
+  failure is sticky until it is fixed.
+
 A build where only the *host* changed does still fire the check for every
-mounted doc, because dependencies persist in the environment and the
-bundle roots are recomputed on each build.
+mounted doc, in both modes, because dependencies persist in the environment
+and the bundle roots are recomputed on each build.
 
 .. note::
 
