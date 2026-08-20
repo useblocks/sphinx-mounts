@@ -3,6 +3,129 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+.. note::
+
+   **Cache invalidation:** the extension now declares an ``env_version``, so
+   the first build after upgrading discards its cached build environment and
+   re-reads every document once. No action is required.
+
+- ``attach_to`` wiring now tracks bundles appearing and disappearing across
+  **incremental** builds, in both directions and without ``sphinx-build -E``.
+  Previously the wiring went stale and never recovered: a bundle whose entry
+  doc was removed left a dead link in the output plus a repeating "toctree
+  contains reference to non-existing document" warning on every later build
+  (a failure under ``-W``), and a bundle whose entry doc appeared was
+  rendered but silently missing from the navigation. Only a full rebuild
+  cleared either state, which contradicted the documented promise that a host
+  project stays buildable as its mounts come and go. Only documents named by
+  an ``attach_to`` are re-read, and only when that mount's contribution
+  actually changed. See :ref:`incremental-rebuilds`.
+
+- Two files of the **same** mount that map to one docname are now reported as
+  a ``mounts.docname_conflict`` instead of silently overwriting each other.
+  This affected both modes — two listed files sharing a basename (file-list
+  mode is a flat namespace), and two files differing only in registered
+  suffix such as ``index.rst`` beside ``index.md`` — and in both cases a
+  document disappeared from the build with no diagnostic at all, where core
+  Sphinx reports "multiple files found for the document" for the same
+  situation in the host source directory. The warning names both contributing
+  paths.
+
+- Every ``docname conflict`` message now states how many files the whole-mount
+  skip drops, and which knob resolves it. One colliding filename removing a
+  whole bundle is a large consequence to report in a single line of a long
+  build log.
+
+- A **file-list mount now has one bundle root** for ``path_check``: the common
+  ancestor of the listed files' directories. It previously had one root per
+  listed file, which made the verdict depend on how deep a file sat in the
+  tree — a reference from ``index.rst`` down into ``notes/`` passed, while the
+  mirror-image reference from ``notes/2026-q1.rst`` up to a shared
+  ``../shared.txt`` was rejected as leaving "the bundle root", in the same
+  mount and the same tree. References that climb above the common ancestor
+  still fail. Listed files that share no filesystem root at all are reported
+  as ``mounts.ambiguous_root`` and fall back to per-file roots.
+
+- The ``path_check`` containment comparison now applies the platform's path
+  case normalisation. Resolving a path does not fold case, and macOS and
+  Windows are case-insensitive but case-preserving, so a bundle configured as
+  ``/x/Bundle`` whose real directory is ``bundle`` could have a perfectly
+  legitimate in-bundle reference rejected as an escape.
+
+- A ``path_check = "error"`` failure is now attributed to this extension —
+  the report reads ``Extension error (sphinx_mounts)`` instead of a bare
+  ``Extension error`` — and the human-readable message is logged before the
+  build aborts, so the line explaining what to fix is not buried inside a
+  crash report that invites the user to open an issue against Sphinx.
+
+- The ``mounts.path_escape`` message now prints the recorded dependency
+  alongside its resolved form, names the mount that owns the bundle root, and
+  states that a symlink pointing out of the bundle is an escape too. The old
+  advice — avoid a leading ``/`` and ``..`` climbing — described nothing the
+  author had written when the escape ran through a symlink.
+
+- A listed file whose whole name is a source suffix (a file called ``.rst``)
+  is now rejected with ``mounts.empty_docname`` and the usual whole-mount
+  skip. It previously produced a docname that was just the mount prefix with
+  a trailing slash — or, for a root mount, the empty string, which wrote a
+  dotfile page at the very root of the site — with no diagnostic.
+
+- ✨ The mounts array may now be declared as ``[[source.mounts]]`` as well as
+  top-level ``[[mounts]]``. Both behave identically; ``[[source.mounts]]`` is
+  recommended for new projects because ``[source]`` is the table that owns
+  source discovery in the shared ``ubproject.toml`` vocabulary. The top-level
+  spelling is **not** deprecated. Declaring both in one file is a hard
+  configuration error naming both locations. See
+  :ref:`where-mounts-live`.
+
+- The extension no longer serialises its own configuration objects into
+  ``environment.pickle``. The parsed mount list, per-document bundle roots
+  and per-mount docname lists are rebuilt on every build, so keeping them in
+  the cache only added weight and pinned the private layout of internal
+  classes. ``setup()`` also declares an ``env_version`` now, so a future
+  change to what the extension stores in the environment invalidates stale
+  caches instead of being restored into a shape their writer never produced.
+
+- Documentation corrections, several of which contradicted the
+  implementation:
+
+  - An out-of-range ``toctree_index`` is a warning, not an
+    ``ExtensionError``; the page previously said both.
+  - The TOML-versus-``conf.py`` rule is that the TOML wins when it
+    **declares mounts**, not merely when the file exists — so a
+    ``ubproject.toml`` present for other tools leaves ``conf.py`` in charge,
+    while an explicitly empty array is a deliberate override.
+  - ``dir`` and ``files`` paths are always resolved, symlinks included, even
+    when already absolute. Diagnostics therefore name the resolved location.
+  - A multi-dot suffix strips the **first** match in ``source_suffix``
+    registration order, not the longest; register longer suffixes first.
+  - The ``include`` / ``exclude`` override list is last-match-wins, so a
+    broad ``exclude`` beats a narrow ``include`` regardless of key order.
+  - ``path_check`` detects rather than prevents, and is skipped entirely on a
+    build that reads no document. Both are now stated outright.
+  - The in-bundle asset-name collision hazard is documented next to
+    ``path_check``: two bundles shipping ``diagram.png`` get one plain and
+    one numbered ``_images`` name, decided by document read order.
+  - ``attach_to`` may point at a **mounted** document, composing one mount
+    into another. This worked but was undocumented.
+  - ``integration.rst`` lists all seven event handlers (it claimed five and
+    omitted the one behind ``path_check``), no longer claims that
+    ``config-inited`` checks path existence, and its illustrative
+    ``discover()`` snippet matches the real signature.
+  - The renderer binaries ``dot`` and ``plantuml`` are documented as a test
+    prerequisite; the ``pyproject.toml`` comment claiming otherwise was
+    stale.
+
+- ✨ New for implementers of a second reader: ``design/mapping-contract.md``
+  is the normative specification of the mount mapping — per-key types and
+  defaults, path anchoring and resolution, the pattern dialect (and how it
+  differs from the same-named ``[source]`` keys owned by other tools),
+  docname derivation, every collision tie-break, and the warning subtypes
+  declared as a stable contract.
+
 .. _`release:0.1.4`:
 
 0.1.4

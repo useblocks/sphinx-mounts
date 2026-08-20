@@ -20,11 +20,20 @@ class TomlConfigError(ExtensionError):
     """Raised when the TOML config file cannot be parsed or is malformed.
 
     Subclasses :class:`sphinx.errors.ExtensionError`, so Sphinx aborts the
-    build with a concise ``Extension error`` message instead of a raw
-    traceback (the crash report on Sphinx ≥ 8 also names this extension via
-    its ``modname``). Config errors are deliberately *not* suppressible:
-    sphinx-mounts cannot proceed at all when the configuration is
-    unreadable.
+    build rather than continuing with a configuration it cannot read. Config
+    errors are deliberately *not* suppressible: sphinx-mounts cannot proceed
+    at all when the configuration is unreadable.
+
+    Passing ``modname`` is what makes the report's first line read
+    ``Extension error (sphinx_mounts)!`` rather than a bare ``Extension
+    error!``, which is the only part of the presentation this extension
+    controls. How much surrounds that line is up to the running Sphinx: 7.x
+    prints the message and nothing else, while from 8.2 on
+    ``sphinx/_cli/util/errors.py`` prints Versions / Last Messages / Loaded
+    Extensions / Traceback blocks and an invitation to open an issue against
+    Sphinx for *every* ``SphinxError``. Naming the module is therefore the
+    difference between a user filing the report in the right place and the
+    wrong one.
     """
 
     def __init__(self, message: str) -> None:
@@ -36,7 +45,8 @@ class MountConfigError(ExtensionError):
 
     Subclasses :class:`sphinx.errors.ExtensionError` for the same reason as
     :class:`TomlConfigError` — a malformed entry means the build cannot
-    proceed, and users must not be able to suppress it away.
+    proceed, and users must not be able to suppress it away. See that class
+    for what ``modname`` does and does not control.
     """
 
     def __init__(self, message: str) -> None:
