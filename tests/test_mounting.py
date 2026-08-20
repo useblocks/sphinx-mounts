@@ -1205,6 +1205,63 @@ def test_single_entry_conflict_message_uses_singular_file(
     assert "mount_at" in warnings  # the remedy for a host/earlier-mount clash
 
 
+def test_listed_file_that_is_only_a_suffix_is_rejected(
+    make_app, make_host_project, tmp_path
+):
+    """A listed file named exactly like a source suffix has no docname, and
+    must be rejected rather than mounted under a nonsense name.
+
+    ``.rst`` leaves an empty docname tail, so the docname became the bare
+    mount prefix with a trailing slash (``"_g/b/"``) — or, for a root mount,
+    the empty string, which wrote a dotfile ``.html`` at the very root of the
+    site. Neither is addressable, and no diagnostic was emitted. Directory
+    mode never produces this (its walker skips hidden entries), so rejecting
+    it also makes the two modes agree about dotfiles.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / ".rst").write_text("Nameless\n========\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(host, [{"files": [str(pkg / ".rst")], "mount_at": "_g/b"}])
+    _set_index_rst(host, "Host\n====\n\nOnly page, no dangling reference.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "mounts.empty_docname" in warnings, warnings
+    assert "no name before its '.rst' suffix" in warnings, warnings
+    assert count_warnings(app) == 1, warnings
+    assert count_mount_warnings(app) == 1
+    # Whole-mount skip: nothing was mounted, and no dotfile page was written.
+    assert "_g/b" not in app.env.project.docnames
+    assert not (Path(app.outdir) / "_g" / "b" / ".html").exists()
+    assert not (Path(app.outdir) / ".html").exists()
+
+
+def test_root_mounted_suffix_only_file_does_not_write_a_dotfile_page(
+    make_app, make_host_project, tmp_path
+):
+    """The root-mount face of the same problem: without ``mount_at`` the empty
+    docname tail produced the docname ``""`` and an output file ``.html`` at
+    the site root."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / ".rst").write_text("Nameless\n========\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(host, [{"files": [str(pkg / ".rst")]}])
+    _set_index_rst(host, "Host\n====\n\nOnly page, no dangling reference.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    assert "mounts.empty_docname" in app._warning.getvalue()
+    assert "" not in app.env.project.docnames
+    assert not (Path(app.outdir) / ".html").exists()
+
+
 def test_docname_conflict_warning_is_suppressible(
     make_app, make_host_project, bundle_simple
 ):

@@ -114,13 +114,57 @@ def test_doc_roots_records_bundle_root_and_path_check(
 
     app = _build(make_app, host)
 
-    roots = app.env.project._doc_roots
-    assert roots["_g/api/index"] == (bundle.resolve(), "error")
+    recorded = app.env.project._doc_roots["_g/api/index"]
+    assert recorded.root == bundle.resolve()
+    assert recorded.path_check == "error"
+    # The mount's label travels with the root so an escape message can name
+    # the mount whose config has to change.
+    assert recorded.label == f"mounts[0] (dir={bundle.resolve()})"
 
 
-def test_doc_roots_files_mode_uses_file_parent_dir(
+def test_doc_roots_files_mode_uses_the_listed_files_common_ancestor(
     make_app, make_host_project, tmp_path
 ):
+    """A file-list mount is ONE bundle, so it gets ONE confinement root: the
+    common ancestor of every listed file's parent directory.
+
+    Recording each file's own parent gave a single mount N roots, which made
+    the ``path_check`` verdict depend on how deep a file sat in the tree —
+    see ``test_files_mode_sibling_reference_within_common_ancestor_is_allowed``.
+    """
+    pkg = tmp_path / "pkg"
+    (pkg / "notes").mkdir(parents=True)
+    (pkg / "index.rst").write_text("Index\n=====\n", encoding="utf-8")
+    (pkg / "notes" / "page.rst").write_text("Page\n====\n", encoding="utf-8")
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "files": [str(pkg / "index.rst"), str(pkg / "notes" / "page.rst")],
+                "mount_at": "_g/api",
+                "path_check": "warn",
+            }
+        ],
+    )
+    _replace_index_toctree(host, "_g/api/index", "_g/api/page")
+
+    app = _build(make_app, host)
+
+    roots = app.env.project._doc_roots
+    # Both docs share the one root, even though their own parents differ.
+    assert roots["_g/api/index"].root == pkg.resolve()
+    assert roots["_g/api/page"].root == pkg.resolve()
+    assert roots["_g/api/page"].path_check == "warn"
+
+
+def test_doc_roots_single_file_mount_root_is_its_parent(
+    make_app, make_host_project, tmp_path
+):
+    """Edge case of the common-ancestor rule: with one listed file the common
+    ancestor is simply that file's parent directory, i.e. the behaviour a
+    single-file mount always had."""
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "page.rst").write_text("Page\n====\n", encoding="utf-8")
@@ -140,7 +184,9 @@ def test_doc_roots_files_mode_uses_file_parent_dir(
 
     app = _build(make_app, host)
 
-    assert app.env.project._doc_roots["_g/api/page"] == (pkg.resolve(), "warn")
+    recorded = app.env.project._doc_roots["_g/api/page"]
+    assert recorded.root == pkg.resolve()
+    assert recorded.path_check == "warn"
 
 
 # ---------- Task 4: happy path — directives resolve inside the bundle ----------
@@ -622,7 +668,9 @@ def test_self_contained_bundle_passes_under_default_error(
 
 
 def test_files_mode_escape_fails(make_app, make_host_project, tmp_path):
-    """In file-list mode the bundle root is the listed file's parent dir."""
+    """In file-list mode the bundle root is the listed files' common ancestor;
+    with a single listed file that is its parent directory, so a ``../``
+    reference still escapes."""
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (tmp_path / "secret.py").write_text("SECRET = 1\n", encoding="utf-8")  # outside pkg
@@ -638,6 +686,115 @@ def test_files_mode_escape_fails(make_app, make_host_project, tmp_path):
     with pytest.raises(Exception, match=r"outside its bundle root"):
         app = make_app(srcdir=host, freshenv=True)
         app.build()
+
+
+def test_files_mode_sibling_reference_within_common_ancestor_is_allowed(
+    make_app, make_host_project, tmp_path
+):
+    """A deeper listed file may reference a file that sits inside the mount's
+    own tree, above that file's own directory.
+
+    This reproduces the shape of the project's own ``release-notes`` example:
+    the mount lists ``index.rst`` and ``notes/2026-q1.rst``, so the bundle
+    spans ``rn/``. A reference from ``index.rst`` *down* into ``notes/``
+    always passed, while the mirror-image reference from
+    ``notes/2026-q1.rst`` *up* to ``../shared.txt`` was rejected as leaving
+    "the bundle root" — same mount, same tree, opposite verdicts purely
+    because of which file was deeper. Both are inside the mount, so both must
+    pass.
+    """
+    rn = tmp_path / "rn"
+    (rn / "notes").mkdir(parents=True)
+    (rn / "shared.txt").write_text("SHARED_TEXT\n", encoding="utf-8")
+    (rn / "index.rst").write_text("RN index\n========\n", encoding="utf-8")
+    (rn / "notes" / "2026-q1.rst").write_text(
+        "Q1 notes\n========\n\n.. literalinclude:: ../shared.txt\n", encoding="utf-8"
+    )
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "files": [str(rn / "index.rst"), str(rn / "notes" / "2026-q1.rst")],
+                "mount_at": "_g/rn",
+            }
+        ],
+    )
+    _replace_index_toctree(host, "_g/rn/index", "_g/rn/2026-q1")
+
+    # The strictest setting, and it must NOT raise.
+    app = _build(make_app, host)
+
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    html = (Path(app.outdir) / "_g" / "rn" / "2026-q1.html").read_text(encoding="utf-8")
+    assert "SHARED_TEXT" in html
+
+
+def test_files_mode_escape_above_common_ancestor_still_fails(
+    make_app, make_host_project, tmp_path
+):
+    """Widening the root to the common ancestor must not disable the check: a
+    reference that climbs above that ancestor is still an escape."""
+    rn = tmp_path / "rn"
+    (rn / "notes").mkdir(parents=True)
+    (tmp_path / "above").mkdir()
+    (tmp_path / "above" / "outside.txt").write_text("ABOVE_TEXT\n", encoding="utf-8")
+    (rn / "index.rst").write_text("RN index\n========\n", encoding="utf-8")
+    (rn / "notes" / "2026-q1.rst").write_text(
+        "Q1 notes\n========\n\n.. literalinclude:: ../../above/outside.txt\n",
+        encoding="utf-8",
+    )
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "files": [str(rn / "index.rst"), str(rn / "notes" / "2026-q1.rst")],
+                "mount_at": "_g/rn",
+            }
+        ],
+    )
+    _replace_index_toctree(host, "_g/rn/index", "_g/rn/2026-q1")
+
+    with pytest.raises(Exception, match=r"outside its bundle root"):
+        app = make_app(srcdir=host, freshenv=True)
+        app.build()
+
+
+def test_path_escape_message_names_the_mount(make_app, make_host_project, tmp_path):
+    """The escape message must name the mount whose ``path_check`` fired.
+
+    "The bundle root" is ambiguous in a project with several mounts, and it is
+    the named mount's config block that has to change.
+    """
+    a = tmp_path / "a"
+    a.mkdir()
+    b = tmp_path / "b"
+    b.mkdir()
+    (a / "index.rst").write_text("A\n=\n", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("OUT\n", encoding="utf-8")
+    (b / "index.rst").write_text(
+        "B\n=\n\n.. literalinclude:: ../outside.txt\n", encoding="utf-8"
+    )
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {"dir": str(a), "mount_at": "_g/a"},
+            {"dir": str(b), "mount_at": "_g/b", "path_check": "warn"},
+        ],
+    )
+    _replace_index_toctree(host, "_g/a/index", "_g/b/index")
+
+    app = _build(make_app, host)
+
+    warnings = app._warning.getvalue()
+    # The SECOND mount is the offender, and it is named as such.
+    assert f"mounts[1] (dir={b.resolve()})" in warnings, warnings
+    assert f"dir={a.resolve()}" not in warnings, warnings
 
 
 def test_path_check_error_is_attributed_to_this_extension(

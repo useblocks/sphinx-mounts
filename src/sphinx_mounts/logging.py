@@ -38,8 +38,10 @@ if TYPE_CHECKING:
 #: Warning subtypes known to sphinx-mounts. Keep sorted — adding a new
 #: subtype should be a visible, reviewable diff.
 WarningTopics = Literal[
+    "ambiguous_root",
     "attach_to_missing",
     "docname_conflict",
+    "empty_docname",
     "missing_path",
     "mount_at_occupied",
     "path_escape",

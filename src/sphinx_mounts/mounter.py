@@ -16,8 +16,9 @@ to read from that external location transparently. This is the entire trick.
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING
+import os
+from pathlib import Path, PurePath
+from typing import TYPE_CHECKING, NamedTuple
 
 from ignore import Walk, WalkBuilder
 from ignore.overrides import OverrideBuilder
@@ -30,9 +31,46 @@ from sphinx_mounts.config import MountConfig, mount_label
 from sphinx_mounts.logging import log_warning
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
 logger = logging.getLogger(__name__)
+
+
+class DocRoot(NamedTuple):
+    """What the path-confinement check needs to know about one mounted doc.
+
+    :param root: The bundle root the doc's file references must stay under.
+    :param path_check: The owning mount's ``path_check`` mode.
+    :param label: The owning mount's :func:`mount_label`, so a message about
+        an escape can name the mount that has to be fixed rather than
+        speaking of "the bundle root" in the abstract.
+    """
+
+    root: Path
+    path_check: str
+    label: str
+
+
+def _is_within(root: Path, candidate: Path) -> bool:
+    """Whether ``candidate`` is ``root`` itself or lives underneath it.
+
+    Both sides pass through :func:`os.path.normcase` first.
+    :meth:`pathlib.Path.resolve` normalises symlinks but **not** case, and
+    macOS (APFS/HFS+) and Windows are case-insensitive but case-preserving:
+    a bundle configured as ``/Users/x/Bundle`` whose real directory is
+    ``bundle``, or an ``include:: SUB/x.txt`` where the directory is ``sub``,
+    would otherwise compare unequal component by component, and a perfectly
+    legitimate in-bundle reference would be reported as an escape. On POSIX
+    ``normcase`` is the identity function, so the fold costs nothing there.
+
+    ``PurePath`` is used for the comparison rather than the concrete
+    ``Path``, because after ``normcase`` the strings are no longer required
+    to name anything on disk — no filesystem access should happen here.
+    """
+    root_key = PurePath(os.path.normcase(str(root)))
+    candidate_key = PurePath(os.path.normcase(str(candidate)))
+    return candidate_key.is_relative_to(root_key)
+
 
 #: Type to store paths as in ``Project._docname_to_path``/``_path_to_docname``.
 #:
@@ -77,9 +115,9 @@ class _MountAwareProject(Project):
     ) -> None:
         super().__init__(srcdir, source_suffix)
         self._mounts = mounts
-        # Maps each mounted docname to (bundle_root, path_check) for the
-        # path-confinement check in the extension. Rebuilt each discover().
-        self._doc_roots: dict[str, tuple[Path, str]] = {}
+        # Maps each mounted docname to the DocRoot the path-confinement check
+        # in the extension needs. Rebuilt each discover().
+        self._doc_roots: dict[str, DocRoot] = {}
         # Ordered docnames produced by each mount, keyed by its index in
         # ``self._mounts``. Consumed by the extension's ``attach_each``
         # wiring, which attaches every file rather than only the entry doc.
@@ -294,9 +332,16 @@ def _build_walker(
 def _attach_mount_files(
     project: _MountAwareProject, mount: MountConfig, files: Iterable[Path], index: int
 ) -> list[str]:
+    """Mount an explicit list of files under ``mount.mount_at``.
+
+    Every listed file's basename (minus the matched suffix) becomes a docname
+    tail, so the result is a flat namespace. All of them share a *single*
+    confinement root — see :func:`_files_bundle_root`.
+    """
     suffixes = tuple(project.source_suffix)
-    entries: list[tuple[str, Path, Path]] = []
-    for abs_path in files:
+    listed = list(files)
+    resolved: list[tuple[str, Path]] = []
+    for abs_path in listed:
         if not abs_path.is_file():
             msg = (
                 f"sphinx-mounts: listed file does not exist and the whole "
@@ -316,9 +361,67 @@ def _attach_mount_files(
             log_warning(logger, msg, "unknown_suffix")
             return []
         docname_tail = abs_path.name[: -len(suffix)]
-        docname = _join_mount(mount.mount_at, docname_tail)
-        entries.append((docname, abs_path, abs_path.parent))
+        if not docname_tail:
+            # The whole basename was the suffix, e.g. a file called exactly
+            # ``.rst``. The docname would be the bare mount prefix with a
+            # trailing slash — or, for a root mount, the empty string, which
+            # writes a dotfile ``.html`` at the site root. Directory mode
+            # never produces this because its walker skips hidden entries, so
+            # rejecting it here also makes the two modes agree.
+            msg = (
+                f"sphinx-mounts: listed file {abs_path} has no name before "
+                f"its {suffix!r} suffix, so it has no docname — the whole "
+                f"mount is skipped. Give the file a name (e.g. "
+                f"index{suffix}) or remove it from the mount's `files` list."
+            )
+            log_warning(logger, msg, "empty_docname")
+            return []
+        resolved.append((_join_mount(mount.mount_at, docname_tail), abs_path))
+
+    root = _files_bundle_root(listed, mount, index)
+    entries = [
+        (docname, abs_path, root if root is not None else abs_path.parent)
+        for docname, abs_path in resolved
+    ]
     return _attach_entries(project, mount, entries, index)
+
+
+def _files_bundle_root(
+    files: Sequence[Path], mount: MountConfig, index: int
+) -> Path | None:
+    """The single confinement root for a file-list mount.
+
+    A file-list mount is one bundle, so it gets one root: the common ancestor
+    of every listed file's parent directory. Using each file's own parent
+    instead gave the mount N roots and made the ``path_check`` verdict depend
+    on how deep in the tree a file happened to sit — a reference from
+    ``index.rst`` *down* into ``notes/`` passed, while the mirror-image
+    reference from ``notes/2026-q1.rst`` *up* to a shared ``../shared.txt``
+    was rejected as leaving "the bundle root", in the same mount and the same
+    tree.
+
+    :return: The common ancestor, or ``None`` when it cannot be computed —
+        which happens when the listed files do not share a filesystem root
+        at all (different Windows drives, or a UNC path beside a drive
+        letter). That is reported as ``mounts.ambiguous_root`` and the caller
+        falls back to per-file parents for this mount: a mount spread across
+        two drives has no meaningful single root, and refusing to build at
+        all would be a worse answer than the previous behaviour.
+    """
+    parents = [f.parent for f in files]
+    try:
+        return Path(os.path.commonpath(parents))
+    except ValueError:
+        msg = (
+            f"sphinx-mounts: {mount_label(mount, index)} lists files with no "
+            f"common parent directory, so the mount has no single bundle "
+            f"root; path_check falls back to treating each listed file's own "
+            f"directory as its root. Move the files under one directory, or "
+            f"split them into separate mounts, to get a predictable "
+            f"path_check verdict."
+        )
+        log_warning(logger, msg, "ambiguous_root")
+        return None
 
 
 def _attach_entries(
@@ -395,7 +498,9 @@ def _attach_entries(
         path_key = _PathKey(abs_path)
         project._docname_to_path[docname] = path_key
         project._path_to_docname[path_key] = docname
-        project._doc_roots[docname] = (root, mount.path_check)
+        project._doc_roots[docname] = DocRoot(
+            root, mount.path_check, mount_label(mount, index)
+        )
         added.append(docname)
         logger.debug("sphinx-mounts: mounted %s -> %s", docname, abs_path)
     return added

@@ -20,7 +20,12 @@ from sphinx_mounts.config import (
     parse_mounts,
 )
 from sphinx_mounts.logging import log_warning
-from sphinx_mounts.mounter import _MountAwareProject, install_mount_aware_project
+from sphinx_mounts.mounter import (
+    DocRoot,
+    _is_within,
+    _MountAwareProject,
+    install_mount_aware_project,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -365,22 +370,24 @@ def _on_check_path_confinement(app: Sphinx, env: Any) -> None:  # noqa: ARG001
     into the host's ``_images``/``_downloads`` output, risking collisions
     with host files). ``path_check`` selects the reaction per mount.
     """
-    doc_roots: dict[str, tuple[Path, str]] = getattr(
+    doc_roots: dict[str, DocRoot] = getattr(
         getattr(env, "project", None), "_doc_roots", {}
     )
     if not doc_roots:
         return
     srcdir = Path(env.srcdir)
-    for docname, (root, mode) in doc_roots.items():
-        if mode == "off":
+    for docname, doc_root in doc_roots.items():
+        if doc_root.path_check == "off":
             continue
-        resolved_root = root.resolve()
+        resolved_root = doc_root.root.resolve()
         for dep in env.dependencies.get(docname, ()):
             abs_dep = (srcdir / dep).resolve()
-            if abs_dep == resolved_root or resolved_root in abs_dep.parents:
+            if _is_within(resolved_root, abs_dep):
                 continue
-            msg = _path_escape_message(docname, dep, abs_dep, resolved_root)
-            if mode == "error":
+            msg = _path_escape_message(
+                docname, dep, abs_dep, resolved_root, doc_root.label
+            )
+            if doc_root.path_check == "error":
                 # Log the actionable line FIRST. On Sphinx >= 8.2 every
                 # ``SphinxError`` is rendered by
                 # ``sphinx/_cli/util/errors.py:handle_exception``, which
@@ -399,7 +406,7 @@ def _on_check_path_confinement(app: Sphinx, env: Any) -> None:  # noqa: ARG001
 
 
 def _path_escape_message(
-    docname: str, dep: Any, abs_dep: Path, resolved_root: Path
+    docname: str, dep: Any, abs_dep: Path, resolved_root: Path, label: str
 ) -> str:
     """Compose the ``path_check`` message for one escaping dependency.
 
@@ -414,16 +421,20 @@ def _path_escape_message(
       though the path written in the directive is plainly bundle-relative.
       Telling that author to avoid a leading ``/`` or ``..`` describes
       something they never wrote.
+
+    ``label`` names the *mount* whose ``path_check`` fired. "The bundle root"
+    on its own is ambiguous in a project with several mounts, and it is the
+    mount's config block that has to change.
     """
     return (
         f"sphinx-mounts: mounted doc {docname!r} references a file outside its "
-        f"bundle root: the recorded dependency {dep} resolves to {abs_dep}, "
-        f"which is not under {resolved_root}. Mounted bundles must be "
-        f"self-contained — use a path relative to the bundle root (no leading "
-        f"'/', and no '..' climbing above the bundle). A symlink pointing out "
-        f"of the bundle counts as an escape too, even when the path written in "
-        f'the directive is plainly bundle-relative. Set path_check = "warn" or '
-        f'"off" on the mount to relax this check.'
+        f"bundle root, which belongs to {label}: the recorded dependency {dep} "
+        f"resolves to {abs_dep}, which is not under {resolved_root}. Mounted "
+        f"bundles must be self-contained — use a path relative to the bundle "
+        f"root (no leading '/', and no '..' climbing above the bundle). A "
+        f"symlink pointing out of the bundle counts as an escape too, even "
+        f"when the path written in the directive is plainly bundle-relative. "
+        f'Set path_check = "warn" or "off" on the mount to relax this check.'
     )
 
 
