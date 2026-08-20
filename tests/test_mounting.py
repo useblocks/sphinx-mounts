@@ -1695,6 +1695,111 @@ def test_source_table_without_mounts_leaves_conf_py_in_charge(
     assert (outdir / "_generated/api-foo/details.html").exists()
 
 
+def test_top_level_mounts_table_warns_that_it_is_deprecated(
+    make_app, make_host_project, bundle_simple
+):
+    """The top-level ``[[mounts]]`` spelling still works, and now says it is
+    deprecated.
+
+    Both spellings load identically, so keeping them as equal citizens would be
+    harmless in isolation — but the sibling tooling that reads this file will
+    only honour ``[[source.mounts]]``, and two readers disagreeing about which
+    tables count is exactly the divergence the mapping contract exists to
+    prevent. The warning is the migration prompt; nothing about the mount
+    changes.
+    """
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [{"dir": str(bundle_simple), "mount_at": "_generated/api-foo"}],
+        namespaced=False,
+    )
+    _replace_index_toctree(host, "_generated/api-foo/index")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    warnings = app._warning.getvalue()
+    assert "mounts.deprecated_location" in warnings, warnings
+    assert "[[source.mounts]]" in warnings, warnings
+    assert count_mount_warnings(app) == 1, warnings
+    # The mount itself is unaffected — deprecated, not broken.
+    html = _read_html(Path(app.outdir), "_generated/api-foo/details")
+    assert "BUNDLE_SIMPLE_DETAILS_MARKER" in html
+
+
+def test_namespaced_mounts_table_does_not_warn(
+    make_app, make_host_project, bundle_simple
+):
+    """The recommended spelling must stay warning-free, or the deprecation is
+    unactionable."""
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [{"dir": str(bundle_simple), "mount_at": "_generated/api-foo"}],
+        namespaced=True,
+    )
+    _replace_index_toctree(host, "_generated/api-foo/index")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    assert count_warnings(app) == 0, app._warning.getvalue()
+
+
+def test_deprecated_location_warning_is_suppressible(
+    make_app, make_host_project, bundle_simple
+):
+    """The escape hatch for a project that cannot migrate yet.
+
+    It matters because ``sphinx-build -W`` is the recommended CI setting, so a
+    new warning would otherwise turn into a hard failure for every project
+    still on the top-level spelling. Suppressing it keeps ``-W`` usable during
+    the migration without disabling the other mount warnings.
+    """
+    host = make_host_project()
+    conf = host / "conf.py"
+    conf.write_text(
+        conf.read_text(encoding="utf-8")
+        + '\nsuppress_warnings = ["mounts.deprecated_location"]\n',
+        encoding="utf-8",
+    )
+    write_ubproject_toml(
+        host,
+        [{"dir": str(bundle_simple), "mount_at": "_generated/api-foo"}],
+        namespaced=False,
+    )
+    _replace_index_toctree(host, "_generated/api-foo/index")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    assert count_warnings(app) == 0, app._warning.getvalue()
+
+
+def test_conf_py_mounts_fallback_is_not_deprecated(
+    make_app, make_host_project, bundle_simple
+):
+    """The legacy ``mounts = [...]`` in ``conf.py`` is deliberately untouched.
+
+    The deprecation is about which *TOML table* the array lives in. The
+    conf.py fallback is a different mechanism with its own trade-offs, and
+    warning about it here would conflate two migrations.
+    """
+    host = make_host_project()
+    patch_conf_py(
+        host,
+        f"[{{'dir': r'{bundle_simple}', 'mount_at': '_generated/api-foo'}}]",
+    )
+    assert not (host / "ubproject.toml").exists()
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+
+    assert "deprecated" not in app._warning.getvalue(), app._warning.getvalue()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+
+
 def test_declaring_mounts_in_both_tables_fails_the_build(
     make_app, make_host_project, bundle_simple
 ):
@@ -1736,7 +1841,8 @@ def test_toml_in_subdir_anchors_paths_to_toml_directory(
     subdir.mkdir()
     toml = subdir / "mounts.toml"
     toml.write_text(
-        '[[mounts]]\ndir = "../../files/bundle"\nmount_at = "_generated/api-foo"\n',
+        '[[source.mounts]]\ndir = "../../files/bundle"\n'
+        'mount_at = "_generated/api-foo"\n',
         encoding="utf-8",
     )
     (host / "conf.py").write_text(

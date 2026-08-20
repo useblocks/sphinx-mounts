@@ -16,7 +16,7 @@ A minimal setup
    .. code-block:: toml
 
       # ubproject.toml
-      [[mounts]]
+      [[source.mounts]]
       dir = "/abs/path/to/bazel-bin/docs/api-foo"
       mount_at = "_generated/api-foo"
 
@@ -81,7 +81,7 @@ build time only when the mount actually resolves:
 
 .. code-block:: toml
 
-   [[mounts]]
+   [[source.mounts]]
    dir = "/path/to/bazel-bin/docs/api-foo"
    mount_at = "_generated/api-foo"
    attach_to = "index"          # extend the toctree in index.rst

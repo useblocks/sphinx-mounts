@@ -14,6 +14,11 @@ import tomllib
 from typing import Any
 
 from sphinx.errors import ExtensionError
+from sphinx.util import logging
+
+from sphinx_mounts.logging import log_warning
+
+logger = logging.getLogger(__name__)
 
 
 class TomlConfigError(ExtensionError):
@@ -622,19 +627,11 @@ TOP_LEVEL_MOUNTS_LOCATION = "[[mounts]]"
 def load_mounts_from_toml(toml_path: Path) -> list[dict[str, Any]] | None:
     """Load the raw ``mounts`` list from a TOML configuration file.
 
-    The array of tables may be declared in either of two places, with
-    identical meaning — same keys, same path anchoring, same validation, same
-    fallback semantics:
+    The array of tables is declared under ``[source]``:
 
     .. code-block:: toml
 
-       [[source.mounts]]             # recommended
-       dir = "/abs/path/to/bundle"
-       mount_at = "_generated/api-foo"
-
-    .. code-block:: toml
-
-       [[mounts]]                    # original spelling, still supported
+       [[source.mounts]]
        dir = "../other/docs"
        mount_at = "guides/other"
        include = ["**/*.rst"]       # optional allowlist
@@ -644,12 +641,20 @@ def load_mounts_from_toml(toml_path: Path) -> list[dict[str, Any]] | None:
        toctree_index = 0            # which toctree (0-based)
        entry_doc = "index"          # which file inside the mount
 
-    ``[[source.mounts]]`` is recommended because ``[source]`` is the table
-    that owns source *discovery* in the ``ubproject.toml`` vocabulary shared
-    with sibling tooling, and because namespacing keeps the file's root from
-    becoming a flat bag of keys. Declaring **both** in one file is a hard
-    error rather than a precedence puzzle: which one wins is not something a
-    reader should have to know.
+    ``[source]`` is the table that owns source *discovery* in the
+    ``ubproject.toml`` vocabulary shared with sibling tooling, and namespacing
+    keeps the file's root from becoming a flat bag of keys.
+
+    The original top-level ``[[mounts]]`` spelling is **deprecated**. It is
+    still read, with identical meaning in every respect, and reported as
+    ``mounts.deprecated_location``. It is deliberately still honoured rather
+    than ignored: sibling readers of this same file recognise only
+    ``[[source.mounts]]``, so warning-while-honouring is what keeps both
+    readers agreeing about the project during a migration.
+
+    Declaring **both** in one file is a hard error rather than a precedence
+    puzzle: which one wins is not something a reader should have to know. A
+    deprecated declaration is still a declaration.
 
     The TOML file is the *primary* config target so that non-Python tooling
     (IDE extensions, language servers, build-system integrations) can read
@@ -718,6 +723,16 @@ def _extract_toml_mounts(
         return None
 
     location, raw_mounts = declared[0]
+    if location == TOP_LEVEL_MOUNTS_LOCATION:
+        msg = (
+            f"sphinx-mounts: `{TOP_LEVEL_MOUNTS_LOCATION}` in {toml_path} is "
+            f"deprecated; rename the table header to "
+            f"`{NAMESPACED_MOUNTS_LOCATION}`. Nothing else changes — the keys, "
+            f"path anchoring and validation are identical. Suppress with "
+            f'suppress_warnings = ["mounts.deprecated_location"] if you cannot '
+            f"migrate yet."
+        )
+        log_warning(logger, msg, "deprecated_location")
     if not isinstance(raw_mounts, list):
         msg = (
             f"sphinx-mounts: `{location}` in {toml_path} must be an "

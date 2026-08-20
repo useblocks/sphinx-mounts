@@ -32,7 +32,7 @@ A TOML file is the opposite:
   shelling out to Python.
 - **Composable**: the same ``ubproject.toml`` can carry sections owned by
   different tools (``[needs]`` for `Sphinx-Needs`_, ``[codelinks]`` for
-  `sphinx-codelinks`_, ``[[mounts]]`` for sphinx-mounts, etc.). The
+  `sphinx-codelinks`_, ``[[source.mounts]]`` for sphinx-mounts, etc.). The
   project has one source of truth.
 - **Diffable & reviewable**: a structured TOML diff is easier to review
   than a Python diff that may include expressions and side-effects.
@@ -48,6 +48,8 @@ A TOML file is the opposite:
 For a side-by-side comparison with the generic, driver-based
 ``sphinx-collections`` extension that solves a superset of the same
 problem, see :ref:`vs-sphinx-collections` in the motivation page.
+
+.. _writing-a-second-reader:
 
 .. admonition:: Writing a second reader?
    :class: tip
@@ -138,8 +140,9 @@ materialize a staging tree.
 The TOML schema
 ---------------
 
-``ubproject.toml`` declares an array of tables — ``[[source.mounts]]``
-(recommended) or top-level ``[[mounts]]``; see :ref:`where-mounts-live`.
+``ubproject.toml`` declares a ``[[source.mounts]]`` array of tables (see
+:ref:`where-mounts-live`, and note that the old top-level ``[[mounts]]``
+spelling is deprecated).
 Each table is one mount entry, and is in one of two **mutually
 exclusive** modes:
 
@@ -156,11 +159,11 @@ and never neither.
    # ubproject.toml
 
    # Directory mode: walk an entire tree.
-   [[mounts]]
+   [[source.mounts]]
    dir = "/abs/path/to/bazel-bin/docs/api-foo"
    mount_at = "_generated/api-foo"
 
-   [[mounts]]
+   [[source.mounts]]
    dir = "../shared-bundles/api-bar"
    mount_at = "_generated/api-bar"
    include = ["**/*.rst"]                # optional allowlist
@@ -168,7 +171,7 @@ and never neither.
    gitignore = false                     # opt out of the bundle's .gitignore
 
    # File-list mode: cherry-pick individual files.
-   [[mounts]]
+   [[source.mounts]]
    files = [
      "/abs/path/to/release-notes/2026-q1.md",
      "/abs/path/to/release-notes/2026-q2.md",
@@ -296,7 +299,7 @@ project as-is, with no prefix renaming:
 
 .. code-block:: toml
 
-   [[mounts]]
+   [[source.mounts]]
    dir = "./api"
    # mount_at omitted — files under ./api appear as bare docnames
    # (e.g. ./api/tutorial.rst → docname "tutorial").
@@ -334,7 +337,7 @@ directory at ``<srcdir>/<mount_at>/`` skip the whole mount with a
 
 .. code-block:: toml
 
-   [[mounts]]
+   [[source.mounts]]
    dir = "/path/to/bundle"
    mount_at = "_generated/api-foo"
    strict_mount_at = true
@@ -372,7 +375,7 @@ build time*, only when the mount is actually present:
 
 .. code-block:: toml
 
-   [[mounts]]
+   [[source.mounts]]
    dir = "/path/to/bazel-bin/docs/api-foo"
    mount_at = "_generated/api-foo"
    attach_to = "index"          # extend the toctree in index.rst
@@ -456,7 +459,7 @@ top-level navigation toctree plus per-section sub-toctrees. Use
 
 .. code-block:: toml
 
-   [[mounts]]
+   [[source.mounts]]
    dir = "/path/to/api-foo"
    mount_at = "_generated/api-foo"
    attach_to = "index"
@@ -488,7 +491,7 @@ different entry point (say ``overview.rst``), set ``entry_doc``:
 
 .. code-block:: toml
 
-   [[mounts]]
+   [[source.mounts]]
    dir = "../shared-bundles/api-bar"
    mount_at = "_generated/api-bar"
    attach_to = "index"
@@ -515,7 +518,7 @@ makes ``attach_to`` append *every* listed file to the host toctree, in
 
 .. code-block:: toml
 
-   [[mounts]]
+   [[source.mounts]]
    files = [
      "../fragments/note-one.rst",
      "../fragments/note-two.rst",
@@ -539,34 +542,54 @@ enforced at config validation:
 
 .. _where-mounts-live:
 
-Where the mounts array lives: ``[[source.mounts]]`` or ``[[mounts]]``
----------------------------------------------------------------------
+Where the mounts array lives: ``[[source.mounts]]``
+---------------------------------------------------
 
-The array of tables may be written in either of two places. Both are
-fully supported and behave **identically** — same keys, same
-:ref:`path anchoring <path-anchoring>`, same validation, same
-:ref:`conf.py fallback <conf-py-fallback>` semantics:
+Declare the array of tables under ``[source]``:
 
 .. code-block:: toml
 
-   # ubproject.toml — recommended
+   # ubproject.toml
    [[source.mounts]]
    dir = "../shared-bundles/api-bar"
    mount_at = "_generated/api-bar"
 
-.. code-block:: toml
+``[source]`` is the table that owns source *discovery* in the
+``ubproject.toml`` vocabulary shared with sibling tooling, which is what a
+mount is, and namespacing keeps the file's root from growing into a flat
+bag of keys.
 
-   # ubproject.toml — original spelling, still supported
-   [[mounts]]
-   dir = "../shared-bundles/api-bar"
-   mount_at = "_generated/api-bar"
+.. deprecated:: next
 
-``[[source.mounts]]`` is recommended for new projects. ``[source]`` is
-the table that owns source *discovery* in the ``ubproject.toml``
-vocabulary shared with sibling tooling, which is what a mount is, and
-namespacing keeps the file's root from growing into a flat bag of keys.
-The top-level ``[[mounts]]`` spelling is not deprecated — existing
-projects need not change anything.
+   The original top-level ``[[mounts]]`` spelling still loads, identically
+   — same keys, same :ref:`path anchoring <path-anchoring>`, same
+   validation, same :ref:`conf.py fallback <conf-py-fallback>` semantics —
+   but it now emits a ``mounts.deprecated_location`` warning. **Migrating
+   is a rename of the table header and nothing else:**
+
+   .. code-block:: diff
+
+      -[[mounts]]
+      +[[source.mounts]]
+       dir = "../shared-bundles/api-bar"
+       mount_at = "_generated/api-bar"
+
+   The reason is not aesthetics. Other tools read this same file, and they
+   honour only ``[[source.mounts]]``. Two readers disagreeing about which
+   tables count is precisely the divergence the
+   :ref:`mapping contract <writing-a-second-reader>` exists to prevent — an
+   editor showing a page the build does not, or the reverse.
+
+   If you cannot migrate yet, and especially if you build with ``-W`` (where
+   any new warning is a hard failure), suppress just this one:
+
+   .. code-block:: python
+
+      # conf.py
+      suppress_warnings = ["mounts.deprecated_location"]
+
+   That leaves every other mount warning escalating as before. Removal of
+   the top-level spelling is not scheduled here.
 
 .. warning::
 
@@ -695,7 +718,7 @@ With ``myst_parser`` enabled, a mount may contain Markdown files:
 .. code-block:: toml
 
    # ubproject.toml
-   [[mounts]]
+   [[source.mounts]]
    dir = "../shared-bundles/release-notes"
    mount_at = "_generated/release-notes"
 
@@ -1021,7 +1044,7 @@ List it under ``exclude``:
 
 .. code-block:: toml
 
-   [[mounts]]
+   [[source.mounts]]
    dir = "../showcase/needs"
    mount_at = "_generated/showcase/needs"
    exclude = ["report-template.rst"]
@@ -1059,6 +1082,9 @@ at once), and escalated to a failed build:
      - Meaning
    * - ``mounts.attach_to_missing``
      - ``attach_to`` references a docname that does not exist
+   * - ``mounts.deprecated_location``
+     - the mounts array is declared as top-level ``[[mounts]]`` rather than
+       ``[[source.mounts]]``; it still loads, identically
    * - ``mounts.docname_conflict``
      - a mount would shadow a docname already provided by the host
        project or an earlier mount, **or** two of the mount's own files

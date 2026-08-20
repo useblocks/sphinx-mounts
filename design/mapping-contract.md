@@ -27,8 +27,8 @@ The array of tables may be declared in either of two locations:
 
 | Location | Status |
 | --- | --- |
-| `[[source.mounts]]` | Recommended. `[source]` owns source discovery in the shared `ubproject.toml` vocabulary. |
-| `[[mounts]]` (top level) | Original spelling. Fully supported, not deprecated. |
+| `[[source.mounts]]` | **Canonical.** `[source]` owns source discovery in the shared `ubproject.toml` vocabulary. |
+| `[[mounts]]` (top level) | **Deprecated.** Reads identically, and emits `mounts.deprecated_location`. |
 
 Rules:
 
@@ -37,6 +37,14 @@ Rules:
    locations.
    A reader must not pick a winner or merge the two: the effective mount list
    would then depend on a precedence rule invisible to anyone reading the file.
+   This is unchanged by the deprecation — a deprecated location is still a
+   declaration.
+1a. The deprecated location must be **read**, not ignored, and reported.
+   A second implementation that honours only `[[source.mounts]]` is the reason
+   the deprecation exists in the first place: if the two readers disagree about
+   which tables count, the same file describes two different projects. Warning
+   on the old spelling while still honouring it is what lets both readers agree
+   during the migration. Removal is not scheduled by this document.
 2. "Declared" means the key is present, including when its value is an empty array.
    `mounts = []` is a statement that the project has no mounts.
 3. A `[source]` table that contains no `mounts` key is not a declaration.
@@ -46,7 +54,9 @@ Rules:
    A mount does not read, default from, or otherwise consult any other `[source]` key.
    See §5 on why this matters for `include` / `exclude` specifically.
 
-Both spellings are identical in every other respect covered by this document.
+Both spellings are identical in every other respect covered by this document —
+keys, anchoring, validation, precedence against `conf.py`, everything in §2
+onwards. The only difference is the diagnostic.
 Where the rest of this document says "the mounts array", it means whichever one
 was declared.
 
@@ -321,6 +331,7 @@ or repurposed without a breaking release.
 | Subtype | Condition | Effect |
 | --- | --- | --- |
 | `mounts.attach_to_missing` | `attach_to` names a docname that does not exist | nothing wired |
+| `mounts.deprecated_location` | the array is declared as top-level `[[mounts]]` | reported only; the mounts load identically |
 | `mounts.docname_conflict` | collision per rules 1-3 above | whole mount skipped |
 | `mounts.empty_docname` | a listed file's name is only a suffix | whole mount skipped |
 | `mounts.ignored_option` | a file-list mount sets `include` or `exclude` | reported only; the keys have no effect |

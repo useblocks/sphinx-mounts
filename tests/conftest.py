@@ -74,7 +74,7 @@ def write_ubproject_toml(
     mounts: Iterable[dict[str, Any]],
     filename: str = "ubproject.toml",
     *,
-    namespaced: bool = False,
+    namespaced: bool = True,
 ) -> Path:
     """Write a ``ubproject.toml`` file declaring the given mounts.
 
@@ -85,9 +85,11 @@ def write_ubproject_toml(
         ``MountConfig.from_dict`` accepts.
     :param filename: TOML file name. Defaults to ``ubproject.toml``.
     :param namespaced: Write the recommended ``[[source.mounts]]`` spelling
-        instead of the top-level ``[[mounts]]`` one. Both are accepted and
-        must behave identically, so tests that care about the distinction pass
-        this explicitly and the rest keep exercising the original spelling.
+        (the default) rather than the deprecated top-level ``[[mounts]]`` one.
+        Both load identically, but the top-level spelling now emits
+        ``mounts.deprecated_location``, so tests that assert a warning count
+        would all have to account for it. Pass ``namespaced=False`` only to
+        exercise the deprecated spelling itself.
     """
     header = "[[source.mounts]]" if namespaced else "[[mounts]]"
     lines: list[str] = []

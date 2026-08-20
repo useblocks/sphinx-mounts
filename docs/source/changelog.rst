@@ -14,6 +14,32 @@ Unreleased
 
 .. warning::
 
+   **Deprecation:** declaring the mounts array as top-level ``[[mounts]]`` now
+   emits a ``mounts.deprecated_location`` warning. Use ``[[source.mounts]]``
+   instead — migrating is a rename of the table header and nothing else:
+
+   .. code-block:: diff
+
+      -[[mounts]]
+      +[[source.mounts]]
+       dir = "../shared-bundles/api-bar"
+
+   The old spelling still loads, with identical keys, anchoring and
+   validation; only the diagnostic is new. It matters because other tools read
+   this same file and recognise only ``[[source.mounts]]``, and two readers
+   disagreeing about which tables count means one file describing two
+   different projects.
+
+   Note this **will fail a** ``sphinx-build -W`` **build** until you migrate.
+   If you cannot yet, suppress just this one and keep ``-W`` for everything
+   else::
+
+      suppress_warnings = ["mounts.deprecated_location"]
+
+   Removal of the top-level spelling is not scheduled in this release.
+
+.. warning::
+
    **Behavior change:** ``path_check`` now defaults to ``"warn"`` instead of
    ``"error"``. A reference that escapes a mount's bundle root is reported as a
    ``mounts.path_escape`` warning and the build continues, where it previously
@@ -136,13 +162,11 @@ Unreleased
   ``toc.not_included`` against the bundle's own file — nowhere near the
   setting responsible.
 
-- ✨ The mounts array may now be declared as ``[[source.mounts]]`` as well as
-  top-level ``[[mounts]]``. Both behave identically; ``[[source.mounts]]`` is
-  recommended for new projects because ``[source]`` is the table that owns
-  source discovery in the shared ``ubproject.toml`` vocabulary. The top-level
-  spelling is **not** deprecated. Declaring both in one file is a hard
-  configuration error naming both locations. See
-  :ref:`where-mounts-live`.
+- ✨ The mounts array is now declared as ``[[source.mounts]]``, and the
+  top-level ``[[mounts]]`` spelling is **deprecated**. ``[source]`` is the
+  table that owns source discovery in the shared ``ubproject.toml``
+  vocabulary. Declaring both in one file remains a hard configuration error
+  naming both locations. See :ref:`where-mounts-live`.
 
 - The extension no longer serialises its own configuration objects into
   ``environment.pickle``. The parsed mount list, per-document bundle roots
