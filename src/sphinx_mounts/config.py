@@ -429,10 +429,26 @@ def _validate_relative_docname(field_name: str, value: object) -> None:
     """Validate a relative docname-shaped string field.
 
     Used by :class:`MountConfig` for ``mount_at``, ``attach_to``, and
-    ``entry_doc``. Rejects non-strings, empty strings, leading slashes,
-    and ``..`` components. Does *not* normalize — that is the caller's
-    responsibility, since each field has a slightly different normalization
-    rule (mount_at strips slashes; entry_doc keeps its shape).
+    ``entry_doc``. The accepted shape is exactly:
+
+    * a non-empty string;
+    * no leading ``/`` — a docname is always relative;
+    * no ``..`` component;
+    * no *interior* empty segment (``a//b``);
+    * no leading or trailing whitespace, in the value or in any segment.
+
+    Everything outside that is a hard :class:`MountConfigError`, in line with
+    the doctrine that a configuration this extension cannot interpret is not
+    suppressible. The last two used to be accepted verbatim, so ``a//b`` and
+    ``" a/b "`` became docnames containing an empty segment or a space — which
+    no host document can ever be, so the mount was silently unreferenceable.
+    Being strict here also keeps the shape describable in one line for a
+    second reader, which "accepted but never usable" is not.
+
+    Trailing slashes are the one thing normalised rather than rejected
+    (``a/b/`` -> ``a/b``), because a docname prefix written with a trailing
+    separator is a natural way to write it and means exactly one thing.
+    Normalisation is the caller's job — each field has its own rule.
     """
     if not isinstance(value, str):
         msg = f"{field_name} must be a string; got {type(value).__name__}."
@@ -448,6 +464,29 @@ def _validate_relative_docname(field_name: str, value: object) -> None:
         raise MountConfigError(msg)
     if ".." in Path(value).parts:
         msg = f"{field_name} must not contain '..' components; got {value!r}."
+        raise MountConfigError(msg)
+    if value != value.strip():
+        msg = (
+            f"{field_name} must not have leading or trailing whitespace; "
+            f"got {value!r}. Docnames are matched exactly, so the surrounding "
+            f"space would make it unreferenceable."
+        )
+        raise MountConfigError(msg)
+    # Trailing slashes are stripped by the caller, so only interior empties
+    # are a problem here. ``"a//b".strip("/").split("/")`` is ``['a', '', 'b']``.
+    segments = value.strip("/").split("/")
+    if any(not segment for segment in segments):
+        msg = (
+            f"{field_name} must not contain an empty path segment; got "
+            f"{value!r}. Collapse the repeated '/' — 'a//b' is not the same "
+            f"docname as 'a/b'."
+        )
+        raise MountConfigError(msg)
+    if any(segment != segment.strip() for segment in segments):
+        msg = (
+            f"{field_name} must not have whitespace around a path segment; "
+            f"got {value!r}."
+        )
         raise MountConfigError(msg)
 
 

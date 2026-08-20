@@ -55,6 +55,61 @@ class TestMountConfig:
         with pytest.raises(MountConfigError, match="must not contain"):
             MountConfig(dir=tmp_path, mount_at="_generated/../escape")
 
+    @pytest.mark.parametrize("field", ["mount_at", "attach_to", "entry_doc"])
+    @pytest.mark.parametrize(
+        ("value", "match"),
+        [
+            pytest.param("a//b", "empty path segment", id="interior-double-slash"),
+            pytest.param("a///b", "empty path segment", id="interior-triple-slash"),
+            pytest.param(" a/b", "leading or trailing whitespace", id="leading-space"),
+            pytest.param("a/b ", "leading or trailing whitespace", id="trailing-space"),
+            pytest.param("a/ b", "whitespace around a path segment", id="inner-lead"),
+            pytest.param("a /b", "whitespace around a path segment", id="inner-trail"),
+        ],
+    )
+    def test_malformed_docname_shapes_rejected(
+        self, tmp_path: Path, field: str, value: str, match: str
+    ) -> None:
+        """Interior empty segments and stray whitespace are hard errors.
+
+        All six shapes used to be accepted verbatim, because ``.strip("/")``
+        only trims the ends. The result was a docname containing an empty
+        segment or a space, which no host document can ever be — so the mount
+        was silently unreferenceable, the worst of the three possible outcomes
+        (accept-and-work, reject, accept-and-never-work).
+
+        Config errors are hard and non-suppressible by this extension's own
+        doctrine, and being strict keeps the accepted shape describable in one
+        line for a second reader.
+        """
+        with pytest.raises(MountConfigError, match=match):
+            MountConfig(dir=tmp_path, **{field: value})
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param("a/b", "a/b", id="plain"),
+            pytest.param("a/b/", "a/b", id="one-trailing-slash"),
+            pytest.param("a/b//", "a/b", id="two-trailing-slashes"),
+            pytest.param("a-b_c/d.e", "a-b_c/d.e", id="punctuation-is-fine"),
+        ],
+    )
+    def test_accepted_mount_at_shapes(
+        self, tmp_path: Path, value: str, expected: str
+    ) -> None:
+        """The complement of the rejection list, so the boundary is pinned from
+        both sides. Trailing slashes are normalised, not rejected: a prefix
+        written with a separator means exactly one thing."""
+        assert MountConfig(dir=tmp_path, mount_at=value).mount_at == expected
+
+    def test_leading_double_slash_is_rejected_as_absolute(self, tmp_path: Path) -> None:
+        """``//a/b`` is caught by the leading-slash rule, not the empty-segment
+        one. Worth pinning because the contract states the leading-slash rule
+        first and a second reader must apply it in that order — stripping
+        surrounding slashes first would accept it."""
+        with pytest.raises(MountConfigError, match="must not start with '/'"):
+            MountConfig(dir=tmp_path, mount_at="//a/b")
+
     def test_extra_keys_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(MountConfigError, match="Unknown mount keys"):
             MountConfig.from_dict(

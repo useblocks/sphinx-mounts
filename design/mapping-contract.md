@@ -120,18 +120,45 @@ Exactly one of `dir` / `files` must be present.
 
 | Key | Type | Default | Meaning and constraints |
 | --- | --- | --- | --- |
-| `mount_at` | string \| absent | absent | Docname prefix. Must be relative: no leading `/`, no `..` component. Surrounding slashes are stripped. Absent means the bundle mounts at the project root, so a bundle file `tutorial.rst` becomes the docname `tutorial`. |
+| `mount_at` | string \| absent | absent | Docname prefix; see §4.1 for the accepted shape. Absent means the bundle mounts at the project root, so a bundle file `tutorial.rst` becomes the docname `tutorial`. |
 | `dir` | string | — | **Directory mode.** Root of a tree to walk. Mutually exclusive with `files`. |
 | `files` | array of strings | — | **File-list mode.** Explicit files, at least one. Mutually exclusive with `dir`. |
 | `include` | array of strings | `[]` | Allowlist patterns, directory mode only. See §5. |
 | `exclude` | array of strings | `[]` | Denylist patterns, directory mode only. See §5. |
 | `gitignore` | bool | `true` | Honour `.gitignore` / `.ignore` files **inside** the walked tree. Directory mode only. See §5. |
-| `attach_to` | string \| absent | absent | Docname whose toctree receives this mount's entries. Same shape constraints as `mount_at`. May name a *mounted* docname, not just a host one (§8). |
+| `attach_to` | string \| absent | absent | Docname whose toctree receives this mount's entries. Same shape rules as `mount_at` (§4.1). May name a *mounted* docname, not just a host one (§8). |
 | `toctree_index` | non-negative int | `0` | Which toctree inside `attach_to`, in document order. Booleans are rejected even though `bool` is an `int` in Python. |
-| `entry_doc` | string | `"index"` | Mount-relative docname to wire. Same shape constraints as `mount_at`. |
+| `entry_doc` | string | `"index"` | Mount-relative docname to wire. Same shape rules as `mount_at` (§4.1). |
 | `attach_each` | bool | `false` | Wire *every* file instead of `entry_doc`. Requires `files` **and** `attach_to`, and is mutually exclusive with a non-default `entry_doc`. |
 | `strict_mount_at` | bool | `false` | Skip the mount if the host srcdir already has a directory at `mount_at`. Requires an explicit `mount_at`. |
 | `path_check` | `"error"` \| `"warn"` \| `"off"` | `"error"` | Reaction to a reference that escapes the bundle root (§6). |
+
+### 4.1 Docname-shaped values
+
+`mount_at`, `attach_to` and `entry_doc` are all docname-shaped strings and are
+validated identically.
+Applied **in this order**, because the order is observable — `//a/b` must be
+rejected as absolute, not silently repaired:
+
+1. Not a string, or the empty string → hard error.
+2. Starts with `/` → hard error. A docname is always relative.
+   This is checked **before** any slash trimming, so `//a/b` and `/abs` are
+   both rejected. An implementation that strips surrounding slashes first
+   would accept `mount_at = "/_generated/api"`, which this one does not.
+3. Contains a `..` component → hard error.
+4. Has leading or trailing whitespace → hard error.
+5. Contains an empty interior segment (`a//b`) or a segment with whitespace
+   around it (`a/ b`) → hard error.
+6. Otherwise accepted, with **trailing** slashes stripped: `a/b/` and `a/b//`
+   both normalise to `a/b`.
+
+Only rule 6 normalises. Everything else rejects, per §7's doctrine that a
+configuration this extension cannot interpret is not suppressible.
+
+Rules 4 and 5 exist because the alternative is worse than either accepting or
+rejecting: a docname containing an empty segment or a space cannot match any
+host document, so such a mount used to be accepted and then be silently
+unreferenceable.
 
 ## 5. Discovery: which files a mount contributes
 
@@ -148,6 +175,11 @@ The walk policy is fixed:
 | hidden entries (dotfiles, dot-directories) | skipped | |
 
 Only files whose name ends with a registered source suffix are kept (§5.3).
+
+`dir` must not contain the host source directory.
+Nothing detects it: the docnames differ (every host page gains a second
+docname under `mount_at`), so no collision rule in §7 can fire, and the whole
+host project is published a second time under the mount prefix.
 
 ### 5.2 File-list mode
 

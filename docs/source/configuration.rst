@@ -788,6 +788,12 @@ on host project labels or substitutions. This guarantees the bundle is
 reusable across host projects and that the IDE/language-server view of
 the project matches the build view.
 
+**``dir`` must not contain the host ``srcdir``.** Nothing detects this, and
+no collision warning can fire — the docnames differ, because every host page
+simply gains a second docname under ``mount_at``. The symptom is the whole
+host project appearing twice in the output. Point ``dir`` at the bundle, not
+at an ancestor of the documentation tree.
+
 **Single attachment point.** This rule applies to both directory and
 file-list mounts: the extension auto-wires *only* the ``entry_doc``
 into the host toctree (see :ref:`toctree-integration`). The mount's

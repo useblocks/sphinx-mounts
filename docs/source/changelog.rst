@@ -84,6 +84,14 @@ Unreleased
   a trailing slash — or, for a root mount, the empty string, which wrote a
   dotfile page at the very root of the site — with no diagnostic.
 
+- ``mount_at``, ``attach_to`` and ``entry_doc`` now **reject** an interior
+  empty segment (``a//b``) and leading or trailing whitespace, as
+  configuration errors. Both were previously accepted verbatim, because only
+  surrounding slashes were trimmed — producing a docname that contains an
+  empty segment or a space, which no host document can match. Such a mount
+  was accepted and then silently unreferenceable. Trailing slashes are still
+  normalised away (``a/b/`` is ``a/b``).
+
 - ✨ The mounts array may now be declared as ``[[source.mounts]]`` as well as
   top-level ``[[mounts]]``. Both behave identically; ``[[source.mounts]]`` is
   recommended for new projects because ``[source]`` is the table that owns
