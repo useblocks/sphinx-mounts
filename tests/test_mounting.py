@@ -2420,11 +2420,23 @@ def test_bundle_churn_without_attach_to_does_not_reread_host(
     make_app, make_host_project, tmp_path
 ):
     """A mount with no ``attach_to`` never touches a host toctree, so adding a
-    file to its bundle must NOT drag any host doc into the re-read set.
+    file to its bundle must NOT drag any host doc into the re-read set, and
+    the handler must not even claim it did.
 
-    Guards the ``env-get-outdated`` handler against over-triggering: the
-    signature only tracks mounts that actually wire something, so an
-    unrelated 200-file bundle churning does not re-read host pages.
+    Two properties are checked, and it is worth being precise about which
+    mechanism supplies which — the two are easy to conflate:
+
+    * no host doc is re-read. This is guaranteed by the *entry-doc gate* in
+      ``_wired_entries``: adding ``extra.rst`` to a bundle that already has
+      its entry doc leaves the wired-entry set untouched, so the signature
+      does not move. It holds even for a mount that *does* carry
+      ``attach_to``, which is why this assertion alone does not exercise the
+      no-``attach_to`` filter (see
+      ``TestWiringSignature::test_mounts_without_attach_to_are_omitted``).
+    * the build log carries no "mount wiring changed" line. This is what the
+      ``attach_to`` filter in ``_wiring_signature`` supplies: without it a
+      mount that cannot wire anything still enters the signature, and its
+      entry doc appearing or disappearing announces a re-read of nothing.
     """
     host = make_host_project()
     bundle = _make_solo_bundle(tmp_path, "plain")
@@ -2441,10 +2453,78 @@ def test_bundle_churn_without_attach_to_does_not_reread_host(
 
     app.build()
     assert count_warnings(app) == 0, app._warning.getvalue()
-    read = _docs_read_in_log(app._status.getvalue()[offset:])
+    churn_log = app._status.getvalue()[offset:]
+    read = _docs_read_in_log(churn_log)
     assert read == {"_g/m/extra"}, (
         f"expected only the new bundle file to be read; read={read}"
     )
+    assert "mount wiring changed" not in churn_log, (
+        f"handler announced a re-read for a mount that wires nothing; log={churn_log!r}"
+    )
+
+
+def test_no_attach_to_mount_entry_doc_appearing_is_silent(
+    make_app, make_host_project, tmp_path
+):
+    """The sharper form of the same fence: the *entry doc* of a mount with no
+    ``attach_to`` appearing must also produce no wiring activity.
+
+    This is the one change that moves a no-``attach_to`` mount's wired-entry
+    set, so it is the only shape that can reach the ``attach_to`` filter in
+    ``_wiring_signature``. General file churn cannot (the entry-doc gate stops
+    it first), and ``attach_each`` without ``attach_to`` is rejected as a
+    config error, so this is the whole surface the filter protects.
+    """
+    host = make_host_project()
+    wired = _make_solo_bundle(tmp_path, "wired")
+    late = tmp_path / "late"
+    late.mkdir()
+    write_ubproject_toml(
+        host,
+        [
+            {"dir": str(wired), "mount_at": "_g/w", "attach_to": "index"},
+            {"dir": str(late), "mount_at": "_g/l"},
+        ],
+    )
+    _set_index_rst(host, "Host\n====\n\nHost prose, no toctree of its own.\n")
+
+    app = make_app(srcdir=host, freshenv=True)
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    offset = len(app._status.getvalue())
+
+    # The second mount gains its entry doc. It wires nothing, so nothing
+    # should be reported, re-read, or logged about the host doc.
+    (late / "index.rst").write_text(":orphan:\n\nLate\n====\n", encoding="utf-8")
+
+    app.build()
+    assert count_warnings(app) == 0, app._warning.getvalue()
+    appear_log = app._status.getvalue()[offset:]
+    assert _docs_read_in_log(appear_log) == {"_g/l/index"}, appear_log
+    assert "mount wiring changed" not in appear_log, (
+        f"a mount that wires nothing entered the signature; log={appear_log!r}"
+    )
+
+
+def test_mounts_confval_rebuilds_the_env(make_app, make_host_project, bundle_simple):
+    """``mounts`` must stay registered with ``rebuild="env"``.
+
+    The wiring signature is keyed on each mount's position in the config list,
+    so inserting or reordering mounts shifts every key. That is only safe
+    because any change to the ``mounts`` value makes Sphinx re-read every
+    document, which re-derives the wiring from scratch. Pinning the setting
+    here turns that coupling from a comment into a mechanical check: if the
+    rebuild trigger is ever weakened, index-keying would silently
+    mis-converge on a reorder instead.
+    """
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle_simple), "mount_at": "_g/m"}])
+    _replace_index_toctree(host, "_g/m/index", "_g/m/intro", "_g/m/details")
+
+    app = make_app(srcdir=host, freshenv=True)
+
+    assert app.config.values["mounts"].rebuild == "env"
+    assert app.config.values["mounts_from_toml"].rebuild == "env"
 
 
 def test_attach_each_rewires_when_the_listed_set_changes(

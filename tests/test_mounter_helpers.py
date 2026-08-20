@@ -9,6 +9,7 @@ import pytest
 from sphinx.project import Project
 
 from sphinx_mounts.config import MountConfig
+from sphinx_mounts.extension import _wiring_signature
 from sphinx_mounts.mounter import (
     _is_within,
     _is_within_any,
@@ -231,3 +232,70 @@ class TestInstallMountAwareProject:
         assert new._mounts == (mount,)
         assert new._doc_roots == {}
         assert new._mount_entry_docnames == {}
+
+
+class TestWiringSignature:
+    """The single filter that decides which mounts can force a host re-read.
+
+    ``_on_env_get_outdated`` walks this mapping rather than the mount list, so
+    a mount that is absent from it cannot cause a re-read. That makes these
+    assertions the only thing standing between a refactor and a handler that
+    over-triggers, which is why they are made directly rather than only
+    through a build.
+    """
+
+    @staticmethod
+    def _mount(**kwargs: object) -> MountConfig:
+        return MountConfig(dir=Path("/b"), **kwargs)  # type: ignore[arg-type]
+
+    def test_mounts_without_attach_to_are_omitted(self) -> None:
+        """A mount that wires nothing must not appear at all.
+
+        If it does, its entry doc appearing or disappearing moves the
+        signature, and the handler announces a re-read of a document that
+        mount has no relationship with.
+        """
+        parsed = (
+            self._mount(mount_at="_g/a", attach_to="index"),
+            self._mount(mount_at="_g/b"),  # no attach_to
+        )
+        docnames = {0: ["_g/a/index"], 1: ["_g/b/index"]}
+        signature = _wiring_signature(parsed, docnames)
+        assert set(signature) == {0}, signature
+
+    def test_value_carries_the_attach_to_target(self) -> None:
+        """Re-pointing a mount at a different host doc is itself a change."""
+        docnames = {0: ["_g/a/index"]}
+        first = _wiring_signature(
+            (self._mount(mount_at="_g/a", attach_to="index"),), docnames
+        )
+        second = _wiring_signature(
+            (self._mount(mount_at="_g/a", attach_to="other"),), docnames
+        )
+        assert first != second
+        assert first[0] == ("index", ("_g/a/index",))
+
+    def test_entries_are_gated_on_what_the_mount_produced(self) -> None:
+        """A mount whose entry doc does not exist wires nothing, so its
+        signature entry is empty rather than optimistic."""
+        parsed = (self._mount(mount_at="_g/a", attach_to="index"),)
+        assert _wiring_signature(parsed, {0: []}) == {0: ("index", ())}
+        assert _wiring_signature(parsed, {0: ["_g/a/other"]}) == {0: ("index", ())}
+
+    def test_entry_doc_appearing_changes_the_signature(self) -> None:
+        parsed = (self._mount(mount_at="_g/a", attach_to="index"),)
+        before = _wiring_signature(parsed, {0: []})
+        after = _wiring_signature(parsed, {0: ["_g/a/index"]})
+        assert before != after
+
+    def test_no_mounts_gives_an_empty_signature(self) -> None:
+        assert _wiring_signature((), {}) == {}
+
+    def test_values_are_hashable_and_comparable(self) -> None:
+        """The signature is persisted on the env and compared with ``==``
+        between builds, so its values must be plain immutable data — a list
+        would compare fine but a mutable value invites aliasing bugs."""
+        signature = _wiring_signature(
+            (self._mount(mount_at="_g/a", attach_to="index"),), {0: ["_g/a/index"]}
+        )
+        assert hash(signature[0])

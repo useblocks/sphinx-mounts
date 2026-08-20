@@ -215,16 +215,38 @@ def _wired_entries(
 
 def _wiring_signature(
     parsed: tuple[MountConfig, ...], mount_docnames: dict[int, list[str]]
-) -> dict[int, list[str]]:
+) -> dict[int, tuple[str, tuple[str, ...]]]:
     """Summarise the toctree wiring the current mount state implies.
 
     Maps the config-list index of every ``attach_to``-carrying mount to the
-    entries it would inject. Mounts without ``attach_to`` never touch a host
-    toctree, so they are left out and their bundles can churn freely without
-    forcing a host doc re-read.
+    pair ``(attach_to docname, entries it would inject)``.
+
+    Mounts without ``attach_to`` never touch a host toctree, so they are
+    **omitted entirely**. That omission is the only place the distinction is
+    made: :func:`_on_env_get_outdated` walks this mapping rather than the
+    mount list, so a mount that is not here cannot cause a host doc to be
+    re-read. Keeping it as a single filter is deliberate — a second,
+    redundant check in the handler would be untestable by construction, since
+    nothing could observe its removal.
+
+    Carrying ``attach_to`` in the value rather than looking it up again also
+    means a mount that is re-pointed at a *different* host doc registers as a
+    change.
+
+    **Coupling worth knowing:** the mapping is keyed on the mount's position
+    in the ``mounts`` config list, so inserting or reordering mounts shifts
+    every key. That is safe only because ``mounts`` is registered with
+    ``rebuild="env"`` (see :func:`setup`), which makes Sphinx re-read every
+    document on any change to the config value — including a reorder. The
+    signature therefore only has to survive changes to a bundle's *file set*,
+    which never shift indices. If ``mounts`` ever loses ``rebuild="env"``, or
+    a future mount source stops flowing through a config value, index-keying
+    would silently mis-converge; ``test_mounts_confval_rebuilds_the_env``
+    pins the setting so that cannot happen quietly. For the same reason
+    ``toctree_index`` is not part of the signature.
     """
     return {
-        index: _wired_entries(mount, index, mount_docnames)
+        index: (mount.attach_to, tuple(_wired_entries(mount, index, mount_docnames)))
         for index, mount in enumerate(parsed)
         if mount.attach_to is not None
     }
@@ -252,22 +274,23 @@ def _on_env_get_outdated(
 
     So compare the wiring this build would produce against the signature the
     previous build persisted on the env, and report every changed mount's
-    ``attach_to`` docname as outdated. Sphinx intersects the returned names
-    with ``env.found_docs`` itself (``sphinx/builders/__init__.py``:
-    ``changed.update(set(docs) & self.env.found_docs)``), so an ``attach_to``
-    pointing at a document that does not exist is dropped there — that case
-    is reported by :func:`_on_check_consistency` instead.
+    ``attach_to`` docname as outdated.
 
     Reporting the host doc outdated has a second, load-bearing effect on a
     build that only *lost* documents: Sphinx guards both the env pickling
     and ``check_consistency()`` behind ``if updated_docnames:``, so such a
     build used to persist nothing and recompute the same "1 removed" for
-    ever. One re-read makes it persist its env and converge.
+    ever. One re-read makes it persist its env and converge. That only works
+    when the ``attach_to`` target actually exists — see the ``found_docs``
+    filtering below — so a mounted docname referenced solely by a
+    hand-written host toctree keeps Sphinx's own removal-only behaviour.
 
-    A missing previous signature (a fresh env, or an env written by a
-    version of this extension that did not record one) counts as "changed":
-    on a fresh env every doc is read anyway, and on an upgraded env one
-    extra re-read is the cheapest way to reach a correct state.
+    A missing previous signature means a fresh environment, where every
+    document is read regardless, so nothing is reported and nothing is
+    logged: the signature is simply recorded for the next build to compare
+    against. An environment written by an older version of this extension
+    cannot reach this branch, because adding ``env_version`` to
+    :func:`setup` already invalidates it.
 
     The ``added`` / ``changed`` / ``removed`` sets Sphinx passes are not
     consulted — the decision rests entirely on the mount wiring, which is
@@ -283,22 +306,32 @@ def _on_env_get_outdated(
     current = _wiring_signature(parsed, mount_docnames)
     previous = getattr(env, _WIRING_SIGNATURE_ATTR, None)
     setattr(env, _WIRING_SIGNATURE_ATTR, current)
-    if previous == current:
+    if previous is None or previous == current:
         return []
+    # Walking the signature, not ``parsed``: a mount without ``attach_to`` is
+    # not in it and so cannot reach this loop at all.
     outdated: list[str] = []
-    for index, mount in enumerate(parsed):
-        if mount.attach_to is None:
+    for index, entry in current.items():
+        if previous.get(index) == entry:
             continue
-        if previous is not None and previous.get(index) == current.get(index):
-            continue
-        if mount.attach_to not in outdated:
-            outdated.append(mount.attach_to)
-    if outdated:
+        attach_to = entry[0]
+        if attach_to not in outdated:
+            outdated.append(attach_to)
+    # Sphinx intersects the returned names with ``env.found_docs`` anyway
+    # (``sphinx/builders/__init__.py``: ``changed.update(set(docs) &
+    # self.env.found_docs)``), so returning a name it will drop is harmless —
+    # but *claiming* to re-read it is not. A mount whose ``attach_to`` is a
+    # typo would otherwise announce "re-reading ['nosuchdoc']" on every build
+    # for ever, an action it cannot perform. The missing target itself is
+    # reported once, by ``_on_check_consistency``.
+    found: frozenset[str] = frozenset(getattr(env, "found_docs", ()))
+    actionable = [docname for docname in outdated if docname in found]
+    if actionable:
         logger.info(
             "sphinx-mounts: mount wiring changed — re-reading %r",
-            outdated,
+            actionable,
         )
-    return outdated
+    return actionable
 
 
 def _select_or_create_toctree(  # noqa: PLR0913
