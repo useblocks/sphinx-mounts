@@ -12,6 +12,28 @@ Unreleased
    the first build after upgrading discards its cached build environment and
    re-reads every document once. No action is required.
 
+.. warning::
+
+   **Behavior change:** ``path_check`` now defaults to ``"warn"`` instead of
+   ``"error"``. A reference that escapes a mount's bundle root is reported as a
+   ``mounts.path_escape`` warning and the build continues, where it previously
+   aborted the build.
+
+   To keep hard failures, do either of:
+
+   - build with ``sphinx-build -W`` (recommended for CI — it escalates *every*
+     mount warning, not just this one); or
+   - set ``path_check = "error"`` explicitly on the mounts that want it. That
+     mode is otherwise unchanged.
+
+   Rationale: every other mount-specific problem in this extension is a typed,
+   suppressible warning that ``-W`` escalates, and
+   :mod:`sphinx_mounts.logging` states that as the doctrine — an escaping
+   reference is no different. The hard default also promised more than its
+   placement can deliver: the check runs from ``env-check-consistency``, which
+   Sphinx skips entirely on a build that reads no document, so it was never a
+   standing invariant.
+
 - ``attach_to`` wiring now tracks bundles appearing and disappearing across
   **incremental** builds, in both directions and without ``sphinx-build -E``.
   Previously the wiring went stale and never recovered: a bundle whose entry

@@ -143,15 +143,26 @@ class MountConfig:
             the host srcdir always exists; that combination is rejected
             at config validation.
         path_check: How to react when a directive inside a mounted doc
-            references a file outside the bundle root (the bundle root is
-            ``dir`` in directory mode, or the listed file's parent
-            directory in file-list mode). One of ``"error"`` (the
-            default — fail the build), ``"warn"`` (log a warning;
-            escalates to an error under ``sphinx-build -W``), or
-            ``"off"`` (disable the check). An escaping reference would
-            otherwise drag an outside file into the host build (and, for
-            asset directives, copy it into the host's output), so the
-            default is a hard error that keeps bundles self-contained.
+            references a file outside the bundle root (in directory mode
+            that is ``dir``; in file-list mode it is any listed file's
+            parent directory). One of ``"warn"`` (the default — log a
+            ``mounts.path_escape`` warning, which ``sphinx-build -W``
+            escalates to a build failure), ``"error"`` (abort the build
+            immediately), or ``"off"`` (disable the check).
+
+            ``"warn"`` is the default because it is what the rest of
+            this extension does: every mount-specific problem is a typed,
+            suppressible warning that ``-W`` turns into a failure, and
+            :mod:`sphinx_mounts.logging` states that as the doctrine. An
+            escaping reference is a mount-specific problem like any
+            other. It is also not something a hard default could
+            actually guarantee: the check runs from
+            ``env-check-consistency``, which Sphinx skips entirely on a
+            build that reads no document, so ``"error"`` was never a
+            standing invariant — only a reaction on the builds that
+            happened to read something.
+
+            Set ``"error"`` where a hard stop is wanted without ``-W``.
     """
 
     mount_at: str | None = None
@@ -165,7 +176,7 @@ class MountConfig:
     entry_doc: str = "index"
     attach_each: bool = False
     strict_mount_at: bool = False
-    path_check: str = "error"
+    path_check: str = "warn"
 
     def __post_init__(self) -> None:
         if self.mount_at is not None:
@@ -290,7 +301,7 @@ class MountConfig:
             entry_doc=entry.get("entry_doc", "index"),
             attach_each=entry.get("attach_each", False),
             strict_mount_at=entry.get("strict_mount_at", False),
-            path_check=entry.get("path_check", "error"),
+            path_check=entry.get("path_check", "warn"),
         )
 
 

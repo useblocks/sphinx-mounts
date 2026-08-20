@@ -94,7 +94,7 @@ There is no opt-out.
 
 Consequences a second implementation must reproduce or knowingly deviate from:
 
-- Path confinement (§6) compares resolved paths on both sides.
+- Path confinement (§9) compares resolved paths on both sides.
   This is what makes a bundle reached through a symlinked directory work rather
   than being reported as an escape — the case that matters whenever a build
   system exposes its outputs through a symlink.
@@ -131,7 +131,7 @@ Exactly one of `dir` / `files` must be present.
 | `entry_doc` | string | `"index"` | Mount-relative docname to wire. Same shape rules as `mount_at` (§4.1). |
 | `attach_each` | bool | `false` | Wire *every* file instead of `entry_doc`. Requires `files` **and** `attach_to`, and is mutually exclusive with a non-default `entry_doc`. |
 | `strict_mount_at` | bool | `false` | Skip the mount if the host srcdir already has a directory at `mount_at`. Requires an explicit `mount_at`. |
-| `path_check` | `"error"` \| `"warn"` \| `"off"` | `"error"` | Reaction to a reference that escapes the bundle root (§6). |
+| `path_check` | `"warn"` \| `"error"` \| `"off"` | `"warn"` | Reaction to a reference that escapes the bundle root (§9). |
 
 ### 4.1 Docname-shaped values
 
@@ -326,7 +326,7 @@ or repurposed without a breaking release.
 | `mounts.ignored_option` | a file-list mount sets `include` or `exclude` | reported only; the keys have no effect |
 | `mounts.missing_path` | `dir` or a listed file is not on disk | whole mount skipped |
 | `mounts.mount_at_occupied` | `strict_mount_at` set, host has a directory at `mount_at` | whole mount skipped |
-| `mounts.path_escape` | a reference leaves the bundle root, `path_check = "warn"` | reported only |
+| `mounts.path_escape` | a reference leaves the bundle root, `path_check = "warn"` (the default) | reported only |
 | `mounts.toctree_index` | `toctree_index` exceeds the toctrees present | mount left unwired, its docs marked orphan |
 | `mounts.unknown_suffix` | a listed file has no registered suffix | whole mount skipped |
 
@@ -398,8 +398,8 @@ implement neither.
   root.
   Two entries in sibling subtrees promote their shared parent to the root; two
   entries on unrelated filesystem branches promote `/`, at which point the
-  check permits every file on the machine and emits nothing — including at the
-  default `path_check = "error"`.
+  check permits every file on the machine and emits nothing — at any
+  `path_check` setting, including `"error"`.
 
 The union of the listed parents is a strict superset of the first rule (so the
 asymmetry stays fixed) and a strict subset of the second (so no directory the
@@ -432,13 +432,20 @@ second implementation should state its own position rather than inherit these
 silently:
 
 - **It detects; it does not prevent.** The offending document has already been
-  read and parsed, and its parsed form persisted, before the check runs. What
-  `"error"` prevents is the *output*: no escaped asset is copied and no page is
-  written.
+  read and parsed, and its parsed form persisted, before the check runs. What a
+  *failing* build prevents is the *output*: no escaped asset is copied and no
+  page is written.
 - **It is not evaluated on a build that reads no document.** Sphinx runs its
   consistency checks only when at least one document was read, so an unchanged
-  re-run skips them. `path_check` is a gate on builds that do work, not a standing
-  invariant.
+  re-run skips them. `path_check` is a gate on builds that do work, not a
+  standing invariant.
+
+The second limit is why the default is `"warn"` rather than a hard failure: a
+hard default would have advertised an invariant this placement cannot provide.
+Escalation belongs to the build driver (`-W` in Sphinx's case), and `"error"`
+stays available for a hard stop without it — its one real advantage being that
+an aborted build discards the cached environment, so the failure re-fires on
+every subsequent run.
 
 `path_check` says nothing about collisions *inside* the output: two bundles that
 both ship `diagram.png` get one unsuffixed and one numbered asset name, and which

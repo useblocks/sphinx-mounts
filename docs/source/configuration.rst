@@ -282,8 +282,8 @@ and never neither.
    * - ``path_check``
      - no
      - How to react when a directive inside a mounted doc references a
-       file outside the bundle root. One of ``"error"`` (default),
-       ``"warn"``, or ``"off"``. See :ref:`path-confinement` below.
+       file outside the bundle root. One of ``"warn"`` (default),
+       ``"error"``, or ``"off"``. See :ref:`path-confinement` below.
 
 .. _root-mount:
 
@@ -891,16 +891,25 @@ with the host project's own files.
 
 .. code-block:: toml
 
-   [[mounts]]
+   [[source.mounts]]
    dir = "/path/to/bundle"
    mount_at = "_generated/api-foo"
-   path_check = "error"   # default — fail the build on any escape
+   path_check = "error"   # opt in to a hard stop without -W
 
-- ``"error"`` (default): an escaping reference fails the build, naming the
-  doc, the resolved path, and the bundle root.
-- ``"warn"``: log a warning instead (escalates to an error under
-  ``sphinx-build -W``).
+- ``"warn"`` (default): log a ``mounts.path_escape`` warning naming the doc,
+  the recorded and resolved paths, and the mount's bundle root(s). Like every
+  other mount warning it is suppressible, and ``sphinx-build -W`` escalates it
+  to a build failure — which is how a CI job turns it into a gate.
+- ``"error"``: abort the build immediately instead. Use it where a hard stop
+  is wanted without ``-W``.
 - ``"off"``: disable the check for this mount.
+
+``"warn"`` is the default because it is what the rest of this extension does:
+:ref:`warnings-and-errors` states the doctrine that every mount-specific
+problem is a typed, suppressible warning which ``-W`` turns into a failure,
+and an escaping reference is a mount-specific problem like any other. A hard
+default also could not deliver the guarantee it implied — see the second limit
+below.
 
 The check is directive-agnostic: it inspects the files Sphinx records as
 dependencies of each mounted doc, so it covers every file-referencing
@@ -915,11 +924,11 @@ can configure away.
 offending doc has already been read and parsed, and its doctree and the
 environment have been written to disk. For content directives
 (``include``, ``literalinclude``, ``csv-table``, ``raw``) the outside
-text is therefore already inside ``.doctrees``. What ``"error"`` does
-prevent is the *output*: the build stops before the write phase, so no
-escaped asset is copied into ``_images`` / ``_downloads`` and no HTML
-ships. Treat ``path_check`` as a gate on what gets published, not as a
-sandbox on what gets read.
+text is therefore already inside ``.doctrees``. What a *failing* build
+prevents — ``path_check = "error"``, or the default under ``-W`` — is the
+*output*: it stops before the write phase, so no escaped asset is copied into
+``_images`` / ``_downloads`` and no HTML ships. Treat ``path_check`` as a gate
+on what gets published, not as a sandbox on what gets read.
 
 **It is not evaluated on a build that reads nothing.** Sphinx runs the
 consistency checks only when at least one document was read
@@ -927,15 +936,20 @@ consistency checks only when at least one document was read
 ``no targets are out of date`` and skips them. What that means for a second
 build depends on the mode:
 
-- With ``path_check = "warn"``, a re-run over an untouched tree is
+- With the default ``"warn"``, a re-run over an untouched tree is
   **silent** — it reports success for a project the previous run flagged. So
   make the *first* build the CI gate, and use ``-E`` (or a clean output
-  directory) if a run has to be self-contained.
-- With the default ``"error"`` there is nothing to slip through: the raised
+  directory) if a run has to be self-contained. The same applies under
+  ``-W``: the escalation only fires on a build that actually re-read the doc.
+- With ``path_check = "error"`` there is nothing to slip through: the raised
   error propagates out of the build, and Sphinx deletes the cached
   environment on its way out. Every subsequent run therefore starts from a
-  fresh environment, reads everything, and fires the check again. The
-  failure is sticky until it is fixed.
+  fresh environment, reads everything, and fires the check again. The failure
+  is sticky until it is fixed. That is the one thing ``"error"`` buys over
+  the default plus ``-W``.
+
+This is also why a hard *default* was the wrong choice: it read as a standing
+invariant and never was one.
 
 A build where only the *host* changed does still fire the check for every
 mounted doc, in both modes, because dependencies persist in the environment
@@ -1063,8 +1077,8 @@ at once), and escalated to a failed build:
      - ``strict_mount_at`` is set and the host already has a directory
        at the mount point; the whole mount is skipped
    * - ``mounts.path_escape``
-     - a mounted doc references a file outside its bundle root (with
-       ``path_check = "warn"``)
+     - a mounted doc references a file outside its bundle root (the default
+       ``path_check = "warn"``; ``"error"`` aborts instead of warning)
    * - ``mounts.toctree_index``
      - ``toctree_index`` exceeds the number of toctrees in the
        ``attach_to`` document; the mount is left unwired and its docs are

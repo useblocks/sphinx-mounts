@@ -117,7 +117,8 @@ def test_doc_roots_records_bundle_root_and_path_check(
     recorded = app.env.project._doc_roots["_g/api/index"]
     # A directory mount has exactly one root: its own dir.
     assert recorded.roots == (bundle.resolve(),)
-    assert recorded.path_check == "error"
+    # The default, which is "warn".
+    assert recorded.path_check == "warn"
     # The mount's label travels with the roots so an escape message can name
     # the mount whose config has to change.
     assert recorded.label == f"mounts[0] (dir={bundle.resolve()})"
@@ -567,7 +568,9 @@ def test_escape_via_leading_slash_fails_by_default(
     bundle = _leaking_literalinclude_bundle(tmp_path, "/host_secret.py")
     host = make_host_project()
     (host / "host_secret.py").write_text("HOST_SECRET = 1\n", encoding="utf-8")
-    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "error"}]
+    )
     _replace_index_toctree(host, "_g/api/index")
 
     with pytest.raises(Exception, match=r"outside its bundle root"):
@@ -589,7 +592,9 @@ def test_escape_via_parent_climb_fails_by_default(
         "Idx\n===\n\n.. toctree::\n\n   sub/page\n", encoding="utf-8"
     )
     host = make_host_project()
-    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "error"}]
+    )
     _replace_index_toctree(host, "_g/api/index")
 
     with pytest.raises(Exception, match=r"outside its bundle root"):
@@ -611,12 +616,68 @@ def test_enforcement_is_directive_agnostic_include(
         "Bundle\n======\n\n.. include:: ../outside_inc.txt\n", encoding="utf-8"
     )
     host = make_host_project()
-    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "error"}]
+    )
     _replace_index_toctree(host, "_g/api/index")
 
     with pytest.raises(Exception, match=r"outside its bundle root"):
         app = make_app(srcdir=host, freshenv=True)
         app.build()
+
+
+def test_escape_at_the_default_path_check_warns_and_builds(
+    make_app, make_host_project, tmp_path
+):
+    """With no ``path_check`` set, an escape is a warning and the build
+    succeeds — and ``sphinx-build -W`` is what turns it into a failure.
+
+    The default was ``"error"``, which fought this extension's own stated
+    doctrine (every mount-specific problem is a typed, suppressible warning
+    that ``-W`` escalates) and could not deliver the guarantee it implied
+    anyway: the check runs from ``env-check-consistency``, which Sphinx skips
+    on a build that reads no document, so a hard default was never a standing
+    invariant.
+
+    Asserted with no ``path_check`` key at all, so the *default* is what is
+    under test rather than an explicit ``"warn"``.
+    """
+    bundle = _leaking_literalinclude_bundle(tmp_path, "../outside.txt")
+    (tmp_path / "outside.txt").write_text("OUTSIDE_AT_DEFAULT\n", encoding="utf-8")
+    host = make_host_project()
+    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)  # must NOT raise
+
+    warnings = app._warning.getvalue()
+    assert "mounts.path_escape" in warnings, warnings
+    assert "outside its bundle root" in warnings, warnings
+    assert count_mount_warnings(app) == 1, warnings
+    # The build really completed: the page exists, unlike under "error".
+    assert (Path(app.outdir) / "_g" / "api" / "index.html").exists()
+
+
+def test_escape_at_the_default_path_check_is_suppressible(
+    make_app, make_host_project, tmp_path
+):
+    """The default being a typed warning means it can be suppressed, which an
+    abort could not be. That is the point of the doctrine it now follows."""
+    bundle = _leaking_literalinclude_bundle(tmp_path, "../outside.txt")
+    (tmp_path / "outside.txt").write_text("OUTSIDE\n", encoding="utf-8")
+    host = make_host_project()
+    conf = host / "conf.py"
+    conf.write_text(
+        conf.read_text(encoding="utf-8")
+        + '\nsuppress_warnings = ["mounts.path_escape"]\n',
+        encoding="utf-8",
+    )
+    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    _replace_index_toctree(host, "_g/api/index")
+
+    app = _build(make_app, host)
+
+    assert count_warnings(app) == 0, app._warning.getvalue()
 
 
 def test_path_check_warn_emits_warning_not_error(make_app, make_host_project, tmp_path):
@@ -684,7 +745,14 @@ def test_files_mode_escape_fails(make_app, make_host_project, tmp_path):
     )
     host = make_host_project()
     write_ubproject_toml(
-        host, [{"files": [str(pkg / "page.rst")], "mount_at": "_g/api"}]
+        host,
+        [
+            {
+                "files": [str(pkg / "page.rst")],
+                "mount_at": "_g/api",
+                "path_check": "error",
+            }
+        ],
     )
     _replace_index_toctree(host, "_g/api/page")
 
@@ -728,7 +796,6 @@ def test_files_mode_sibling_reference_within_the_mounts_roots_is_allowed(
     )
     _replace_index_toctree(host, "_g/rn/index", "_g/rn/2026-q1")
 
-    # The strictest setting, and it must NOT raise.
     app = _build(make_app, host)
 
     assert count_warnings(app) == 0, app._warning.getvalue()
@@ -746,8 +813,8 @@ def test_files_mode_reference_into_the_unlisted_shared_parent_is_flagged(
     *common ancestor* of its listed files let the ``files`` list drive the root
     arbitrarily wide: two entries in sibling subtrees promoted their shared
     parent, so every file under it — here ``secret.txt``, which sits in
-    neither listed directory — became reachable with no diagnostic at all, at
-    the default ``path_check = "error"``. Entries on unrelated filesystem
+    neither listed directory — became reachable with no diagnostic at all,
+    even at ``path_check = "error"``. Entries on unrelated filesystem
     branches promoted the root to ``/``, permitting the whole machine.
 
     The union of the listed parents has no such hole: ``treeA/d1`` and
@@ -766,11 +833,17 @@ def test_files_mode_reference_into_the_unlisted_shared_parent_is_flagged(
     host = make_host_project()
     write_ubproject_toml(
         host,
-        [{"files": [str(a / "x.rst"), str(b / "y.rst")], "mount_at": "_g/fl"}],
+        [
+            {
+                "files": [str(a / "x.rst"), str(b / "y.rst")],
+                "mount_at": "_g/fl",
+                "path_check": "error",
+            }
+        ],
     )
     _replace_index_toctree(host, "_g/fl/x", "_g/fl/y")
 
-    # The default path_check is "error", so this must abort the build.
+    # path_check = "error" aborts the build, which is what pins the message.
     app = make_app(srcdir=host, freshenv=True)
     with pytest.raises(ExtensionError) as excinfo:
         app.build()
@@ -852,6 +925,7 @@ def test_files_mode_escape_above_every_root_still_fails(
             {
                 "files": [str(rn / "index.rst"), str(rn / "notes" / "2026-q1.rst")],
                 "mount_at": "_g/rn",
+                "path_check": "error",
             }
         ],
     )
@@ -899,8 +973,8 @@ def test_path_escape_message_names_the_mount(make_app, make_host_project, tmp_pa
 def test_path_check_error_is_attributed_to_this_extension(
     make_app, make_host_project, tmp_path
 ):
-    """The default ``path_check = "error"`` must name sphinx-mounts and print
-    the actionable line before the crash report.
+    """``path_check = "error"`` must name sphinx-mounts and print the
+    actionable line before the crash report.
 
     A bundle-authoring mistake is rendered by Sphinx as a crash: from Sphinx
     8.2 on, ``sphinx/_cli/util/errors.py:handle_exception`` prints Versions /
@@ -917,7 +991,9 @@ def test_path_check_error_is_attributed_to_this_extension(
     bundle = _leaking_literalinclude_bundle(tmp_path, "../outside.txt")
     (tmp_path / "outside.txt").write_text("OUTSIDE\n", encoding="utf-8")
     host = make_host_project()
-    write_ubproject_toml(host, [{"dir": str(bundle), "mount_at": "_g/api"}])
+    write_ubproject_toml(
+        host, [{"dir": str(bundle), "mount_at": "_g/api", "path_check": "error"}]
+    )
     _replace_index_toctree(host, "_g/api/index")
 
     app = make_app(srcdir=host, freshenv=True)

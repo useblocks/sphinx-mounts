@@ -406,9 +406,22 @@ class TestMountConfig:
         with pytest.raises(MountConfigError, match=r"strict_mount_at.*mount_at"):
             MountConfig(dir=tmp_path, strict_mount_at=True)
 
-    def test_path_check_defaults_to_error(self, tmp_path: Path) -> None:
-        m = MountConfig(dir=tmp_path, mount_at="x")
-        assert m.path_check == "error"
+    def test_path_check_defaults_to_warn(self, tmp_path: Path) -> None:
+        """The default is the extension's own doctrine: a typed warning that
+        ``sphinx-build -W`` escalates.
+
+        It was ``"error"``. That fought the doctrine
+        (``sphinx_mounts.logging``: every mount-specific problem is a
+        suppressible warning that ``-W`` turns into a failure) and could not
+        deliver what it promised anyway, since the check is skipped entirely
+        on a build that reads no document.
+        """
+        assert MountConfig(dir=tmp_path, mount_at="x").path_check == "warn"
+        # ...and via the TOML/dict path, which has its own default literal.
+        assert (
+            MountConfig.from_dict({"dir": str(tmp_path), "mount_at": "x"}).path_check
+            == "warn"
+        )
 
     def test_path_check_accepts_warn_and_off(self, tmp_path: Path) -> None:
         assert (
