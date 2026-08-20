@@ -1494,6 +1494,110 @@ def test_toml_overrides_conf_py_mounts(
     assert not (outdir / "_generated/from-py/index.html").exists()
 
 
+def test_namespaced_mounts_table_mounts_end_to_end(
+    make_app, make_host_project, bundle_simple
+):
+    """``[[source.mounts]]`` mounts exactly like the top-level spelling.
+
+    ``[source]`` is the table that owns source discovery in the shared
+    ``ubproject.toml`` vocabulary, so it is the natural home for a mount and
+    the spelling the docs now recommend. This is the end-to-end proof that
+    choosing it changes nothing about the build.
+    """
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [{"dir": str(bundle_simple), "mount_at": "_generated/api-foo"}],
+        namespaced=True,
+    )
+
+    outdir = _build_clean(make_app, host)
+
+    html = _read_html(outdir, "_generated/api-foo/details")
+    assert "BUNDLE_SIMPLE_DETAILS_MARKER" in html
+    assert not (host / "_generated").exists()
+
+
+def test_namespaced_mounts_table_overrides_conf_py(
+    make_app, make_host_project, bundle_simple, bundle_nested
+):
+    """The TOML-wins rule is a property of the file declaring mounts, not of
+    which table they are written in."""
+    host = make_host_project()
+    patch_conf_py(
+        host,
+        f"[{{'dir': r'{bundle_nested}', 'mount_at': '_generated/from-py'}}]",
+    )
+    write_ubproject_toml(
+        host,
+        [{"dir": str(bundle_simple), "mount_at": "_generated/from-toml"}],
+        namespaced=True,
+    )
+    _replace_index_toctree(host, "_generated/from-toml/index")
+
+    outdir = _build_clean(make_app, host)
+
+    assert (outdir / "_generated/from-toml/details.html").exists()
+    assert not (outdir / "_generated/from-py/index.html").exists()
+
+
+def test_empty_namespaced_mounts_array_overrides_conf_py(
+    make_app, make_host_project, bundle_simple
+):
+    """An explicitly empty ``[source].mounts`` is a deliberate "no mounts" and
+    must switch a legacy ``conf.py`` list off — the same as the empty
+    top-level array does. A *missing* key would instead leave ``conf.py`` in
+    charge, which is what makes the empty array meaningful."""
+    host = make_host_project()
+    patch_conf_py(
+        host,
+        f"[{{'dir': r'{bundle_simple}', 'mount_at': '_generated/from-py'}}]",
+    )
+    (host / "ubproject.toml").write_text("[source]\nmounts = []\n", encoding="utf-8")
+    _set_index_rst(host, "Host\n====\n\nNo mounts at all.\n")
+
+    outdir = _build_clean(make_app, host)
+
+    assert not (outdir / "_generated/from-py/index.html").exists()
+
+
+def test_source_table_without_mounts_leaves_conf_py_in_charge(
+    make_app, make_host_project, bundle_simple
+):
+    """A ``ubproject.toml`` present for *other* tools must not switch mounts
+    off. The rule is "the TOML wins if it declares mounts", so a ``[source]``
+    table with no ``mounts`` key falls through to ``conf.py``."""
+    host = make_host_project()
+    patch_conf_py(
+        host,
+        f"[{{'dir': r'{bundle_simple}', 'mount_at': '_generated/api-foo'}}]",
+    )
+    (host / "ubproject.toml").write_text(
+        '[source]\nrespect_gitignore = true\ninclude = ["*.rst"]\n', encoding="utf-8"
+    )
+
+    outdir = _build_clean(make_app, host)
+
+    assert (outdir / "_generated/api-foo/details.html").exists()
+
+
+def test_declaring_mounts_in_both_tables_fails_the_build(
+    make_app, make_host_project, bundle_simple
+):
+    """Both spellings in one file is a hard, non-suppressible config error
+    naming both locations."""
+    host = make_host_project()
+    (host / "ubproject.toml").write_text(
+        f'[[mounts]]\ndir = "{bundle_simple}"\n\n'
+        f'[[source.mounts]]\ndir = "{bundle_simple}"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception, match=r"declares mounts in two places"):
+        app = make_app(srcdir=host, freshenv=True)
+        app.build()
+
+
 def test_toml_in_subdir_anchors_paths_to_toml_directory(
     make_app, make_host_project, bundle_simple
 ):

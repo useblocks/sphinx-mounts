@@ -120,7 +120,8 @@ materialize a staging tree.
 The TOML schema
 ---------------
 
-``ubproject.toml`` declares a top-level ``[[mounts]]`` array of tables.
+``ubproject.toml`` declares an array of tables — ``[[source.mounts]]``
+(recommended) or top-level ``[[mounts]]``; see :ref:`where-mounts-live`.
 Each table is one mount entry, and is in one of two **mutually
 exclusive** modes:
 
@@ -459,6 +460,54 @@ enforced at config validation:
 - **Mutually exclusive with ``entry_doc``.** ``attach_each`` attaches all
   files, so a single entry doc is meaningless; setting both is an error.
 
+.. _where-mounts-live:
+
+Where the mounts array lives: ``[[source.mounts]]`` or ``[[mounts]]``
+---------------------------------------------------------------------
+
+The array of tables may be written in either of two places. Both are
+fully supported and behave **identically** — same keys, same
+:ref:`path anchoring <path-anchoring>`, same validation, same
+:ref:`conf.py fallback <conf-py-fallback>` semantics:
+
+.. code-block:: toml
+
+   # ubproject.toml — recommended
+   [[source.mounts]]
+   dir = "../shared-bundles/api-bar"
+   mount_at = "_generated/api-bar"
+
+.. code-block:: toml
+
+   # ubproject.toml — original spelling, still supported
+   [[mounts]]
+   dir = "../shared-bundles/api-bar"
+   mount_at = "_generated/api-bar"
+
+``[[source.mounts]]`` is recommended for new projects. ``[source]`` is
+the table that owns source *discovery* in the ``ubproject.toml``
+vocabulary shared with sibling tooling, which is what a mount is, and
+namespacing keeps the file's root from growing into a flat bag of keys.
+The top-level ``[[mounts]]`` spelling is not deprecated — existing
+projects need not change anything.
+
+.. warning::
+
+   Declaring **both** in one file is a hard configuration error naming
+   both locations. Picking a winner (or merging the two) would make the
+   effective mount list depend on a precedence rule that nobody reading
+   the file can see.
+
+.. note::
+
+   ``[source]`` keys other than ``mounts`` are **not** read by
+   sphinx-mounts, and a mount does not inherit anything from them. In
+   particular ``[source].include`` / ``[source].exclude`` (owned by other
+   tools) are a different pattern dialect from a mount's own
+   ``include`` / ``exclude`` — see :ref:`file-discovery`. Nesting the
+   array inside ``[source]`` is a naming decision, not an inheritance
+   one.
+
 .. _conf-py-fallback:
 
 Fallback: ``mounts`` in ``conf.py``
@@ -484,8 +533,19 @@ cannot adopt a TOML file yet.
        },
    ]
 
-If both ``ubproject.toml`` and ``mounts`` in ``conf.py`` are present, the
-TOML file wins.
+The precise rule is that the TOML wins when it **declares mounts** — not
+merely when the file exists:
+
+- The TOML declares a mounts array (in either
+  :ref:`location <where-mounts-live>`) → the TOML wins and ``conf.py``'s
+  ``mounts`` is ignored.
+- The TOML declares an **empty** array (``mounts = []``) → that is still a
+  declaration, and a deliberate one: the project has no mounts, and
+  ``conf.py``'s list is switched off.
+- The TOML declares no mounts key at all → ``conf.py``'s ``mounts`` still
+  applies. This is the common case for a ``ubproject.toml`` that exists
+  only to configure *other* tools, and it means adding such a file to a
+  project never silently disables its mounts.
 
 .. _path-anchoring:
 

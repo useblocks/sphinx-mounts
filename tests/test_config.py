@@ -470,6 +470,141 @@ class TestLoadMountsFromToml:
         with pytest.raises(TomlConfigError, match="must be an array of tables"):
             load_mounts_from_toml(toml)
 
+
+class TestNamespacedMountsTable:
+    """``[[source.mounts]]`` is accepted alongside the top-level ``[[mounts]]``.
+
+    ``[source]`` is the table that owns source discovery in the
+    ``ubproject.toml`` vocabulary shared with sibling tooling, so it is the
+    natural home for a mount and the spelling the docs now recommend. The
+    original top-level spelling stays supported, and the two must be
+    indistinguishable in every respect except where they are written.
+    """
+
+    def test_namespaced_table_is_loaded(self, tmp_path: Path) -> None:
+        toml = tmp_path / "ubproject.toml"
+        toml.write_text(
+            '[[source.mounts]]\ndir = "bundle_a"\nmount_at = "_generated/api-a"\n',
+            encoding="utf-8",
+        )
+        raw = load_mounts_from_toml(toml)
+        assert raw is not None
+        assert len(raw) == 1
+        assert raw[0]["mount_at"] == "_generated/api-a"
+
+    def test_namespaced_table_anchors_paths_identically(self, tmp_path: Path) -> None:
+        """Path anchoring is a property of the file, not of the table it is
+        written in, so both spellings must produce the same absolute paths."""
+        subdir = tmp_path / "configs"
+        subdir.mkdir()
+        top = subdir / "top.toml"
+        top.write_text('[[mounts]]\ndir = "../shared"\n', encoding="utf-8")
+        namespaced = subdir / "namespaced.toml"
+        namespaced.write_text(
+            '[[source.mounts]]\ndir = "../shared"\n', encoding="utf-8"
+        )
+
+        assert load_mounts_from_toml(top) == load_mounts_from_toml(namespaced)
+        loaded = load_mounts_from_toml(namespaced)
+        assert loaded is not None
+        assert loaded[0]["dir"] == str((tmp_path / "shared").resolve())
+
+    def test_namespaced_table_coexists_with_other_source_keys(
+        self, tmp_path: Path
+    ) -> None:
+        """A ``[source]`` table carrying keys owned by other tools must not
+        disturb the mounts array nested inside it."""
+        toml = tmp_path / "ubproject.toml"
+        toml.write_text(
+            "[source]\n"
+            "respect_gitignore = true\n"
+            'include = ["*.rst"]\n'
+            "\n"
+            "[[source.mounts]]\n"
+            'dir = "bundle"\n'
+            'mount_at = "_g/x"\n',
+            encoding="utf-8",
+        )
+        raw = load_mounts_from_toml(toml)
+        assert raw is not None
+        assert len(raw) == 1
+        assert raw[0]["mount_at"] == "_g/x"
+
+    def test_declaring_both_spellings_raises(self, tmp_path: Path) -> None:
+        """Two declarations in one file is a hard error, not a precedence
+        puzzle: which one wins is not something a reader of the file could
+        know, and silently merging them would be worse."""
+        toml = tmp_path / "ubproject.toml"
+        toml.write_text(
+            '[[mounts]]\ndir = "a"\n\n[[source.mounts]]\ndir = "b"\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(TomlConfigError) as excinfo:
+            load_mounts_from_toml(toml)
+        message = str(excinfo.value)
+        # BOTH locations are named, so the user knows what to delete.
+        assert "[[source.mounts]]" in message
+        assert "[[mounts]]" in message
+        assert str(toml) in message
+
+    def test_source_table_without_mounts_is_not_a_declaration(
+        self, tmp_path: Path
+    ) -> None:
+        """A ``[source]`` table that declares no ``mounts`` key returns
+        ``None``, so a legacy ``mounts`` in ``conf.py`` still applies.
+
+        This is the namespaced half of the "declares mounts" rule: a TOML file
+        present for *other* tools must not silently switch mounts off.
+        """
+        toml = tmp_path / "ubproject.toml"
+        toml.write_text("[source]\nrespect_gitignore = true\n", encoding="utf-8")
+        assert load_mounts_from_toml(toml) is None
+
+    def test_empty_namespaced_array_is_an_explicit_override(
+        self, tmp_path: Path
+    ) -> None:
+        """An explicitly empty array is a declaration of "no mounts" and must
+        be distinguishable from an absent key, in the namespaced form exactly
+        as in the top-level one."""
+        toml = tmp_path / "ubproject.toml"
+        toml.write_text("[source]\nmounts = []\n", encoding="utf-8")
+        assert load_mounts_from_toml(toml) == []
+
+    def test_empty_top_level_array_is_an_explicit_override(
+        self, tmp_path: Path
+    ) -> None:
+        toml = tmp_path / "ubproject.toml"
+        toml.write_text("mounts = []\n", encoding="utf-8")
+        assert load_mounts_from_toml(toml) == []
+
+    def test_namespaced_mounts_not_a_list_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "ubproject.toml"
+        toml.write_text("[source.mounts]\nfoo = 1\n", encoding="utf-8")
+        with pytest.raises(TomlConfigError, match="must be an array of tables"):
+            load_mounts_from_toml(toml)
+
+    def test_namespaced_shape_error_names_the_namespaced_location(
+        self, tmp_path: Path
+    ) -> None:
+        """The shape error must name the table the user actually wrote, not
+        always the top-level one."""
+        toml = tmp_path / "ubproject.toml"
+        toml.write_text("[source]\nmounts = [1]\n", encoding="utf-8")
+        with pytest.raises(TomlConfigError) as excinfo:
+            load_mounts_from_toml(toml)
+        assert "[[source.mounts]]" in str(excinfo.value)
+
+    def test_source_that_is_not_a_table_is_ignored(self, tmp_path: Path) -> None:
+        """``source`` owned by another tool as a scalar must not crash the
+        lookup; the top-level array still applies."""
+        toml = tmp_path / "ubproject.toml"
+        toml.write_text(
+            'source = "somewhere"\n[[mounts]]\ndir = "a"\n', encoding="utf-8"
+        )
+        raw = load_mounts_from_toml(toml)
+        assert raw is not None
+        assert len(raw) == 1
+
     def test_pipeline_loads_and_validates(self, tmp_path: Path) -> None:
         """Round-trip: TOML → load_mounts_from_toml → parse_mounts."""
         (tmp_path / "bundle").mkdir()

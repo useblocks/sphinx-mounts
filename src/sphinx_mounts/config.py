@@ -524,20 +524,34 @@ def _resolve_files(files: tuple[Path, ...], confdir: Path) -> tuple[Path, ...]:
     )
 
 
+#: Spelling recommended for new projects: ``[source]`` is the table that owns
+#: source *discovery* in the shared ``ubproject.toml`` vocabulary, which is
+#: where a mount belongs, and namespacing keeps the file's root from becoming
+#: a flat bag of keys.
+NAMESPACED_MOUNTS_LOCATION = "[[source.mounts]]"
+
+#: The original spelling. Still fully supported — projects that use it do not
+#: need to change anything — but new projects should prefer
+#: :data:`NAMESPACED_MOUNTS_LOCATION`.
+TOP_LEVEL_MOUNTS_LOCATION = "[[mounts]]"
+
+
 def load_mounts_from_toml(toml_path: Path) -> list[dict[str, Any]] | None:
     """Load the raw ``mounts`` list from a TOML configuration file.
 
-    The TOML file is expected to declare a top-level ``[[mounts]]`` array of
-    tables, one block per mount, with the same keys accepted by
-    :class:`MountConfig`:
+    The array of tables may be declared in either of two places, with
+    identical meaning — same keys, same path anchoring, same validation, same
+    fallback semantics:
 
     .. code-block:: toml
 
-       [[mounts]]
+       [[source.mounts]]             # recommended
        dir = "/abs/path/to/bundle"
        mount_at = "_generated/api-foo"
 
-       [[mounts]]
+    .. code-block:: toml
+
+       [[mounts]]                    # original spelling, still supported
        dir = "../other/docs"
        mount_at = "guides/other"
        include = ["**/*.rst"]       # optional allowlist
@@ -546,6 +560,13 @@ def load_mounts_from_toml(toml_path: Path) -> list[dict[str, Any]] | None:
        attach_to = "index"          # extend a toctree in index.rst
        toctree_index = 0            # which toctree (0-based)
        entry_doc = "index"          # which file inside the mount
+
+    ``[[source.mounts]]`` is recommended because ``[source]`` is the table
+    that owns source *discovery* in the ``ubproject.toml`` vocabulary shared
+    with sibling tooling, and because namespacing keeps the file's root from
+    becoming a flat bag of keys. Declaring **both** in one file is a hard
+    error rather than a precedence puzzle: which one wins is not something a
+    reader should have to know.
 
     The TOML file is the *primary* config target so that non-Python tooling
     (IDE extensions, language servers, build-system integrations) can read
@@ -560,11 +581,13 @@ def load_mounts_from_toml(toml_path: Path) -> list[dict[str, Any]] | None:
 
     :param toml_path: Absolute path to a TOML file. May or may not exist.
     :return: The raw list of mount tables (each a ``dict``), or ``None`` if
-        ``toml_path`` does not exist or contains no top-level ``mounts``
-        array. Returning ``None`` is not an error — callers fall back to
-        the ``mounts`` value from ``conf.py``.
-    :raises TomlConfigError: If the file exists but is not valid TOML, or
-        if the top-level ``mounts`` key has the wrong shape.
+        ``toml_path`` does not exist or declares neither spelling. Returning
+        ``None`` is not an error — callers fall back to the ``mounts`` value
+        from ``conf.py``. Note that an explicitly declared *empty* array is
+        not ``None``: it is a deliberate "this project has no mounts" and
+        does override ``conf.py``.
+    :raises TomlConfigError: If the file exists but is not valid TOML, if it
+        declares both spellings, or if the mounts array has the wrong shape.
     """
     if not toml_path.is_file():
         return None
@@ -575,24 +598,56 @@ def load_mounts_from_toml(toml_path: Path) -> list[dict[str, Any]] | None:
         msg = f"sphinx-mounts: failed to parse TOML config {toml_path}: {e}"
         raise TomlConfigError(msg) from e
 
-    raw_mounts = data.get("mounts")
-    if raw_mounts is None:
+    extracted = _extract_toml_mounts(data, toml_path)
+    if extracted is None:
         return None
+    _anchor_toml_paths(extracted, toml_path.parent)
+    return extracted
+
+
+def _extract_toml_mounts(
+    data: Mapping[str, Any], toml_path: Path
+) -> list[dict[str, Any]] | None:
+    """Pick the mounts array out of parsed TOML data and validate its shape.
+
+    :return: The raw list, or ``None`` when neither spelling is declared.
+    :raises TomlConfigError: If both spellings are declared, or the declared
+        one is not an array of tables.
+    """
+    source = data.get("source")
+    declared: list[tuple[str, Any]] = []
+    if isinstance(source, Mapping) and "mounts" in source:
+        declared.append((NAMESPACED_MOUNTS_LOCATION, source["mounts"]))
+    if "mounts" in data:
+        declared.append((TOP_LEVEL_MOUNTS_LOCATION, data["mounts"]))
+
+    if len(declared) > 1:
+        locations = " and ".join(location for location, _ in declared)
+        msg = (
+            f"sphinx-mounts: {toml_path} declares mounts in two places: "
+            f"{locations}. Keep exactly one — merging them silently, or "
+            f"picking a winner, would make the effective mount list depend on "
+            f"a precedence rule nobody reading the file can see. "
+            f"{NAMESPACED_MOUNTS_LOCATION} is the recommended spelling."
+        )
+        raise TomlConfigError(msg)
+    if not declared:
+        return None
+
+    location, raw_mounts = declared[0]
     if not isinstance(raw_mounts, list):
         msg = (
-            f"sphinx-mounts: top-level `mounts` in {toml_path} must be an "
+            f"sphinx-mounts: `{location}` in {toml_path} must be an "
             f"array of tables; got {type(raw_mounts).__name__}."
         )
         raise TomlConfigError(msg)
     for index, entry in enumerate(raw_mounts):
         if not isinstance(entry, dict):
             msg = (
-                f"sphinx-mounts: `mounts[{index}]` in {toml_path} must be a "
-                f"table; got {type(entry).__name__}."
+                f"sphinx-mounts: entry {index} of `{location}` in "
+                f"{toml_path} must be a table; got {type(entry).__name__}."
             )
             raise TomlConfigError(msg)
-
-    _anchor_toml_paths(raw_mounts, toml_path.parent)
     return raw_mounts
 
 
