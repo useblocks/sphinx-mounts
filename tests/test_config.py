@@ -59,28 +59,39 @@ class TestMountConfig:
     @pytest.mark.parametrize(
         ("value", "match"),
         [
-            pytest.param("a//b", "empty path segment", id="interior-double-slash"),
-            pytest.param("a///b", "empty path segment", id="interior-triple-slash"),
+            pytest.param(
+                "a//b", "empty or '.' path segment", id="interior-double-slash"
+            ),
+            pytest.param(
+                "a///b", "empty or '.' path segment", id="interior-triple-slash"
+            ),
             pytest.param(" a/b", "leading or trailing whitespace", id="leading-space"),
             pytest.param("a/b ", "leading or trailing whitespace", id="trailing-space"),
             pytest.param("a/ b", "whitespace around a path segment", id="inner-lead"),
             pytest.param("a /b", "whitespace around a path segment", id="inner-trail"),
+            pytest.param("a/./b", "empty or '.' path segment", id="interior-dot"),
+            pytest.param("./a", "empty or '.' path segment", id="leading-dot"),
+            pytest.param("a/.", "empty or '.' path segment", id="trailing-dot"),
+            pytest.param(".", "empty or '.' path segment", id="bare-dot"),
         ],
     )
     def test_malformed_docname_shapes_rejected(
         self, tmp_path: Path, field: str, value: str, match: str
     ) -> None:
-        """Interior empty segments and stray whitespace are hard errors.
+        """Empty segments, ``.`` segments and stray whitespace are hard errors.
 
-        All six shapes used to be accepted verbatim, because ``.strip("/")``
-        only trims the ends. The result was a docname containing an empty
-        segment or a space, which no host document can ever be — so the mount
-        was silently unreferenceable, the worst of the three possible outcomes
-        (accept-and-work, reject, accept-and-never-work).
+        All of these used to be accepted verbatim, because ``.strip("/")``
+        only trims the ends and nothing looked inside the segments. A docname
+        is matched **literally**, not resolved as a filesystem path, so each
+        shape produced something no host document can ever be — the mount was
+        accepted and then silently unreferenceable, the worst of the three
+        possible outcomes (accept-and-work, reject, accept-and-never-work).
+
+        The bare ``.`` is worse still and has its own test below.
 
         Config errors are hard and non-suppressible by this extension's own
-        doctrine, and being strict keeps the accepted shape describable in one
-        line for a second reader.
+        doctrine, and being strict keeps the accepted shape describable in a
+        few lines for a second implementation.
         """
         with pytest.raises(MountConfigError, match=match):
             MountConfig(dir=tmp_path, **{field: value})
@@ -101,6 +112,46 @@ class TestMountConfig:
         both sides. Trailing slashes are normalised, not rejected: a prefix
         written with a separator means exactly one thing."""
         assert MountConfig(dir=tmp_path, mount_at=value).mount_at == expected
+
+    @pytest.mark.parametrize("field", ["mount_at", "attach_to", "entry_doc"])
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param("a/b/", "a/b", id="one-trailing-slash"),
+            pytest.param("a/b//", "a/b", id="two-trailing-slashes"),
+            pytest.param("index/", "index", id="single-segment"),
+        ],
+    )
+    def test_trailing_slashes_normalised_on_every_docname_field(
+        self, tmp_path: Path, field: str, value: str, expected: str
+    ) -> None:
+        """All three docname fields normalise trailing slashes identically.
+
+        ``entry_doc`` did not, while the contract and the changelog both said
+        the three fields are validated identically and that trailing slashes
+        are stripped. The consequence was silent: the wired docname became
+        ``"<mount_at>/index/"``, which is not among the docnames the mount
+        produced, so the entry-doc gate dropped it and the mount was
+        mounted-but-never-wired — reported only as a ``toc.not_included``
+        against the bundle file, nowhere near the setting that caused it.
+        """
+        assert getattr(MountConfig(dir=tmp_path, **{field: value}), field) == expected
+
+    def test_bare_dot_mount_at_is_rejected(self, tmp_path: Path) -> None:
+        """``mount_at = "."`` is the one shape whose old behaviour was worse
+        than unreferenceable.
+
+        Written to mean "the project root", it produced the docname
+        ``./index`` alongside the host project's own ``index``: two distinct
+        docnames resolving to one output file, so the mounted page was
+        overwritten with no diagnostic at all. Omitting ``mount_at`` is how a
+        root mount is expressed, and the error message says so.
+        """
+        with pytest.raises(MountConfigError) as excinfo:
+            MountConfig(dir=tmp_path, mount_at=".")
+        message = str(excinfo.value)
+        assert "'.' path segment" in message, message
+        assert "omit mount_at" in message, message
 
     def test_leading_double_slash_is_rejected_as_absolute(self, tmp_path: Path) -> None:
         """``//a/b`` is caught by the leading-slash rule, not the empty-segment

@@ -147,18 +147,25 @@ rejected as absolute, not silently repaired:
    would accept `mount_at = "/_generated/api"`, which this one does not.
 3. Contains a `..` component → hard error.
 4. Has leading or trailing whitespace → hard error.
-5. Contains an empty interior segment (`a//b`) or a segment with whitespace
-   around it (`a/ b`) → hard error.
+5. Contains an empty interior segment (`a//b`), a `.` segment (`a/./b`, or a
+   bare `.`), or a segment with whitespace around it (`a/ b`) → hard error.
 6. Otherwise accepted, with **trailing** slashes stripped: `a/b/` and `a/b//`
-   both normalise to `a/b`.
+   both normalise to `a/b`. This applies to all three fields alike.
 
 Only rule 6 normalises. Everything else rejects, per §7's doctrine that a
 configuration this extension cannot interpret is not suppressible.
 
-Rules 4 and 5 exist because the alternative is worse than either accepting or
-rejecting: a docname containing an empty segment or a space cannot match any
-host document, so such a mount used to be accepted and then be silently
-unreferenceable.
+Rules 4 and 5 exist because a docname is matched **literally**, never resolved
+as a filesystem path, so the alternative is worse than either accepting or
+rejecting cleanly:
+
+- A docname holding an empty segment or a space cannot match any host
+  document, so such a mount was accepted and then silently unreferenceable.
+- A `.` segment is not a no-op. A bare `mount_at = "."` — the natural way to
+  try to write "the project root" — yields the docname `./index` *alongside*
+  the host's own `index`: two distinct docnames resolving to one output file,
+  so one page is overwritten with no diagnostic at all. A root mount is
+  expressed by **omitting** `mount_at`.
 
 ## 5. Discovery: which files a mount contributes
 

@@ -2620,6 +2620,44 @@ def test_no_attach_to_mount_entry_doc_appearing_is_silent(
     )
 
 
+def test_entry_doc_with_trailing_slash_wires_like_the_clean_form(
+    make_app, make_host_project, tmp_path
+):
+    """``entry_doc = "index/"`` must wire exactly as ``"index"`` does.
+
+    It previously mounted the bundle and then never wired it: the wired
+    docname was built as ``"<mount_at>/index/"``, which is not among the
+    docnames the mount produced, so the entry-doc gate in ``_wired_entries``
+    dropped it. The only symptom was a ``toc.not_included`` pointing at the
+    bundle's own file — nowhere near the setting responsible — while the
+    contract and the changelog both promised that all three docname fields
+    normalise trailing slashes.
+    """
+    bundle = _make_solo_bundle(tmp_path, "trailing")
+
+    host = make_host_project()
+    write_ubproject_toml(
+        host,
+        [
+            {
+                "dir": str(bundle),
+                "mount_at": "_g/m",
+                "attach_to": "index",
+                "entry_doc": "index/",
+            }
+        ],
+    )
+    _set_index_rst(host, "Host\n====\n\nHost prose, no toctree of its own.\n")
+
+    # A warning-free build is the whole point: no toc.not_included.
+    outdir = _build_clean(make_app, host)
+
+    index_html = (outdir / "index.html").read_text(encoding="utf-8")
+    assert "_g/m/index.html" in index_html, (
+        "entry_doc with a trailing slash was mounted but never wired"
+    )
+
+
 def test_dangling_attach_to_does_not_announce_a_re_read(
     make_app, make_host_project, tmp_path
 ):

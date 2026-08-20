@@ -94,12 +94,25 @@ Unreleased
   dotfile page at the very root of the site — with no diagnostic.
 
 - ``mount_at``, ``attach_to`` and ``entry_doc`` now **reject** an interior
-  empty segment (``a//b``) and leading or trailing whitespace, as
-  configuration errors. Both were previously accepted verbatim, because only
-  surrounding slashes were trimmed — producing a docname that contains an
-  empty segment or a space, which no host document can match. Such a mount
-  was accepted and then silently unreferenceable. Trailing slashes are still
-  normalised away (``a/b/`` is ``a/b``).
+  empty segment (``a//b``), a ``.`` segment (``a/./b``, or a bare ``.``), and
+  leading or trailing whitespace, as configuration errors. All were previously
+  accepted verbatim, because only surrounding slashes were trimmed. A docname
+  is matched literally rather than resolved as a filesystem path, so each
+  produced something no host document can match, and the mount was accepted
+  and then silently unreferenceable.
+
+  A bare ``mount_at = "."`` was worse than unreferenceable: written to mean
+  "the project root", it produced the docname ``./index`` alongside the host
+  project's own ``index``, so two distinct docnames resolved to one output
+  file and the mounted page was overwritten with no diagnostic at all. Omit
+  ``mount_at`` for a root mount.
+
+- Trailing slashes are now normalised away on **``entry_doc``** too
+  (``index/`` is ``index``), as they always were on ``mount_at`` and
+  ``attach_to``. Previously ``entry_doc = "index/"`` mounted the bundle and
+  then never wired it into the host toctree, reported only as a
+  ``toc.not_included`` against the bundle's own file — nowhere near the
+  setting responsible.
 
 - ✨ The mounts array may now be declared as ``[[source.mounts]]`` as well as
   top-level ``[[mounts]]``. Both behave identically; ``[[source.mounts]]`` is

@@ -202,6 +202,17 @@ class MountConfig:
             raise MountConfigError(msg)
 
         _validate_relative_docname("entry_doc", self.entry_doc)
+        # Same normalisation as mount_at / attach_to above. Without it,
+        # ``entry_doc = "index/"`` was accepted and then never matched: the
+        # wired docname became ``"<mount_at>/index/"``, which is not among the
+        # docnames the mount produced, so the entry-doc gate dropped it and
+        # the mount was mounted-but-unwired. The only symptom was a
+        # ``toc.not_included`` pointing at the bundle file rather than at the
+        # configuration. A leading '/' is already rejected above, so rstrip is
+        # equivalent to strip here.
+        normalized_entry = self.entry_doc.rstrip("/")
+        if normalized_entry != self.entry_doc:
+            object.__setattr__(self, "entry_doc", normalized_entry)
 
         _validate_attach_each(
             self.attach_each, self.files, self.attach_to, self.entry_doc
@@ -434,21 +445,31 @@ def _validate_relative_docname(field_name: str, value: object) -> None:
     * a non-empty string;
     * no leading ``/`` — a docname is always relative;
     * no ``..`` component;
-    * no *interior* empty segment (``a//b``);
+    * no *interior* empty segment (``a//b``) and no ``.`` segment
+      (``a/./b``, or a bare ``.``);
     * no leading or trailing whitespace, in the value or in any segment.
 
     Everything outside that is a hard :class:`MountConfigError`, in line with
     the doctrine that a configuration this extension cannot interpret is not
-    suppressible. The last two used to be accepted verbatim, so ``a//b`` and
-    ``" a/b "`` became docnames containing an empty segment or a space — which
-    no host document can ever be, so the mount was silently unreferenceable.
-    Being strict here also keeps the shape describable in one line for a
-    second reader, which "accepted but never usable" is not.
+    suppressible. Those shapes used to be accepted verbatim, and a docname is
+    matched **literally** rather than resolved as a filesystem path, so each
+    of them produced something no host document can ever be:
+
+    * ``a//b`` and ``" a/b "`` gave a docname holding an empty segment or a
+      space, leaving the mount silently unreferenceable;
+    * ``.`` was worse than unreferenceable. Written to mean "the project
+      root", it produced the docname ``./index`` alongside the host's own
+      ``index``: two distinct docnames resolving to one output file, so the
+      mounted page was overwritten with no diagnostic at all. Omitting
+      ``mount_at`` is how a root mount is expressed.
+
+    Being strict here also keeps the accepted shape describable in a few lines
+    for a second implementation, which "accepted but never usable" is not.
 
     Trailing slashes are the one thing normalised rather than rejected
-    (``a/b/`` -> ``a/b``), because a docname prefix written with a trailing
-    separator is a natural way to write it and means exactly one thing.
-    Normalisation is the caller's job — each field has its own rule.
+    (``a/b/`` -> ``a/b``), because a docname written with a trailing separator
+    is a natural way to write it and means exactly one thing. This function
+    does not normalise; the caller does, uniformly for all three fields.
     """
     if not isinstance(value, str):
         msg = f"{field_name} must be a string; got {type(value).__name__}."
@@ -475,11 +496,13 @@ def _validate_relative_docname(field_name: str, value: object) -> None:
     # Trailing slashes are stripped by the caller, so only interior empties
     # are a problem here. ``"a//b".strip("/").split("/")`` is ``['a', '', 'b']``.
     segments = value.strip("/").split("/")
-    if any(not segment for segment in segments):
+    if any(segment in ("", ".") for segment in segments):
         msg = (
-            f"{field_name} must not contain an empty path segment; got "
-            f"{value!r}. Collapse the repeated '/' — 'a//b' is not the same "
-            f"docname as 'a/b'."
+            f"{field_name} must not contain an empty or '.' path segment; got "
+            f"{value!r}. Docnames are matched literally, not resolved as "
+            f"filesystem paths, so 'a/./b' is a different docname from 'a/b' "
+            f"and '.' is not a way to write the project root — omit "
+            f"{field_name} instead."
         )
         raise MountConfigError(msg)
     if any(segment != segment.strip() for segment in segments):
