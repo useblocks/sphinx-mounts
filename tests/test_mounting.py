@@ -1806,9 +1806,12 @@ def test_declaring_mounts_in_both_tables_fails_the_build(
     """Both spellings in one file is a hard, non-suppressible config error
     naming both locations."""
     host = make_host_project()
+    # as_posix(): a Windows path's backslashes are escape characters inside
+    # a double-quoted TOML string, so the file would fail to parse before
+    # the two-tables check ever ran.
     (host / "ubproject.toml").write_text(
-        f'[[mounts]]\ndir = "{bundle_simple}"\n\n'
-        f'[[source.mounts]]\ndir = "{bundle_simple}"\n',
+        f'[[mounts]]\ndir = "{bundle_simple.as_posix()}"\n\n'
+        f'[[source.mounts]]\ndir = "{bundle_simple.as_posix()}"\n',
         encoding="utf-8",
     )
 

@@ -92,57 +92,70 @@ class TestIsWithin:
 
 
 class TestListedRoots:
-    """The confinement root SET of a file-list mount."""
+    """The confinement root SET of a file-list mount.
 
-    def test_single_file_root_is_its_parent(self) -> None:
-        assert _listed_roots([Path("/rn/index.rst")]) == (Path("/rn"),)
+    Fixture paths are anchored under a resolved ``tmp_path`` (the ``base``
+    fixture) rather than fabricated absolute literals: the helper resolves
+    each parent, and a fabricated path resolves differently per platform —
+    on macOS ``/var`` is a symlink into ``/private``, and on Windows a
+    drive-less ``/pkg`` lands on the current drive (``D:/pkg`` on CI) — so
+    literal expectations fail on exactly the platforms CI adds. An
+    already-canonical prefix makes the resolve a no-op everywhere.
+    """
 
-    def test_files_at_different_depths_contribute_both_parents(self) -> None:
+    @pytest.fixture()
+    def base(self, tmp_path: Path) -> Path:
+        """Canonical absolute prefix for fabricated paths (see class docstring)."""
+        return tmp_path.resolve()
+
+    def test_single_file_root_is_its_parent(self, base: Path) -> None:
+        assert _listed_roots([base / "rn/index.rst"]) == (base / "rn",)
+
+    def test_files_at_different_depths_contribute_both_parents(
+        self, base: Path
+    ) -> None:
         """The deeper file's own directory AND the shallower one are roots, so
         a reference from the deeper document up into the shallower directory is
         in-bundle. That is the asymmetry the union rule exists to fix."""
         assert _listed_roots(
-            [Path("/rn/index.rst"), Path("/rn/notes/2026-q1.rst")]
-        ) == (Path("/rn"), Path("/rn/notes"))
+            [base / "rn/index.rst", base / "rn/notes/2026-q1.rst"]
+        ) == (base / "rn", base / "rn/notes")
 
-    def test_sibling_directories_do_not_promote_their_shared_parent(self) -> None:
-        """The bound that matters: listing `/pkg/a/one.rst` and `/pkg/b/two.rst`
-        makes `/pkg/a` and `/pkg/b` roots — NOT `/pkg`.
+    def test_sibling_directories_do_not_promote_their_shared_parent(
+        self, base: Path
+    ) -> None:
+        """The bound that matters: listing `pkg/a/one.rst` and `pkg/b/two.rst`
+        makes `pkg/a` and `pkg/b` roots — NOT `pkg`.
 
-        The common ancestor would be `/pkg`, which the user never named, and
+        The common ancestor would be `pkg`, which the user never named, and
         everything else under it would silently become in-bundle. With two
-        entries on unrelated filesystem branches the ancestor would be `/`,
-        turning the default ``path_check = "error"`` into a no-op.
+        entries on unrelated filesystem branches the ancestor would be the
+        filesystem root, turning even ``path_check = "error"`` into a no-op.
         """
-        roots = _listed_roots([Path("/pkg/a/one.rst"), Path("/pkg/b/two.rst")])
-        assert roots == (Path("/pkg/a"), Path("/pkg/b"))
-        assert Path("/pkg") not in roots
+        roots = _listed_roots([base / "pkg/a/one.rst", base / "pkg/b/two.rst"])
+        assert roots == (base / "pkg/a", base / "pkg/b")
+        assert base / "pkg" not in roots
 
-    def test_identical_parents_collapse_to_one_root(self) -> None:
-        assert _listed_roots([Path("/pkg/one.rst"), Path("/pkg/two.rst")]) == (
-            Path("/pkg"),
+    def test_identical_parents_collapse_to_one_root(self, base: Path) -> None:
+        assert _listed_roots([base / "pkg/one.rst", base / "pkg/two.rst"]) == (
+            base / "pkg",
         )
 
-    def test_order_follows_the_files_list(self) -> None:
+    def test_order_follows_the_files_list(self, base: Path) -> None:
         """Roots are reported in ``files`` order so diagnostics are stable."""
-        assert _listed_roots([Path("/z/one.rst"), Path("/a/two.rst")]) == (
-            Path("/z"),
-            Path("/a"),
+        assert _listed_roots([base / "z/one.rst", base / "a/two.rst"]) == (
+            base / "z",
+            base / "a",
         )
 
-    def test_disjoint_branches_stay_disjoint(self) -> None:
-        """Unrelated branches contribute exactly themselves. No ancestor is
-        computed, so there is no ``ValueError`` case and no fallback to
-        report — the previous implementation needed both.
-
-        ``/usr`` rather than ``/var``: the helper resolves each parent, and
-        on macOS ``/var`` is a symlink to ``/private/var``, so a fabricated
-        ``/var`` path resolves to a different root there and the equality
-        fails on that platform alone.
-        """
-        assert _listed_roots([Path("/opt/a/one.rst"), Path("/usr/b/two.rst")]) == (
-            Path("/opt/a"),
-            Path("/usr/b"),
+    def test_disjoint_branches_stay_disjoint(self, base: Path) -> None:
+        """Branches that share nothing below the anchor contribute exactly
+        themselves. No ancestor is computed, so there is no ``ValueError``
+        case and no fallback to report — the previous implementation needed
+        both."""
+        assert _listed_roots([base / "opt/a/one.rst", base / "usr/b/two.rst"]) == (
+            base / "opt/a",
+            base / "usr/b",
         )
 
 
