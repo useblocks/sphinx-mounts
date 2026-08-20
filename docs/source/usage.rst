@@ -124,8 +124,11 @@ churning does not drag host pages into the rebuild.
    when the ``attach_to`` target itself exists. A mounted docname that a host
    page references by **hand** — written into a toctree in the source — is
    not covered: nothing marks that host page outdated when the mount
-   disappears, so its dead link and the accompanying
-   ``toc.not_readable`` persist until the page is touched or ``-E`` is used.
+   disappears, so its dead link persists *silently*. The
+   ``toc.not_readable`` warning is **not** re-emitted, because Sphinx
+   re-resolves a toctree only when the page is re-read — so even ``-W``
+   passes. The warning appears, and the dead link goes away, only once the
+   page is touched or ``-E`` is used.
 
    That residue is Sphinx's own behaviour, not something mounting
    introduces: deleting an ordinary host document leaves exactly the same

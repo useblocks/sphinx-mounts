@@ -47,7 +47,7 @@ Unreleased
   nothing — the only contradictory key combination in the extension that was
   neither rejected nor reported.
 
-- A **file-list mount's ``path_check`` roots are now the union of its listed
+- A file-list mount's ``path_check`` **roots are now the union of its listed
   files' directories**, so a reference is in-bundle when it sits under any
   directory the mount named. Each document was previously confined to its own
   file's parent, which made the verdict depend on how deep a file sat in the
@@ -63,7 +63,7 @@ Unreleased
 .. note::
 
    **For projects that suppressed** ``mounts.path_escape``: the false positive
-   described below (a reference between two files of the same file-list mount)
+   described above (a reference between two files of the same file-list mount)
    used to be reported with the *same* subtype as a genuine escape, so
    silencing one silenced both. With the false positive gone, a project that
    suppressed the subtype to quiet it will start seeing the genuine escapes it
@@ -107,7 +107,7 @@ Unreleased
   file and the mounted page was overwritten with no diagnostic at all. Omit
   ``mount_at`` for a root mount.
 
-- Trailing slashes are now normalised away on **``entry_doc``** too
+- Trailing slashes are now **also** normalised away on ``entry_doc``
   (``index/`` is ``index``), as they always were on ``mount_at`` and
   ``attach_to``. Previously ``entry_doc = "index/"`` mounted the bundle and
   then never wired it into the host toctree, reported only as a

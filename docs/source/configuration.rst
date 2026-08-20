@@ -805,7 +805,7 @@ on host project labels or substitutions. This guarantees the bundle is
 reusable across host projects and that the IDE/language-server view of
 the project matches the build view.
 
-**``dir`` must not contain the host ``srcdir``.** Nothing detects this, and
+**dir** must not contain the host ``srcdir``. Nothing detects this, and
 no collision warning can fire — the docnames differ, because every host page
 simply gains a second docname under ``mount_at``. The symptom is the whole
 host project appearing twice in the output. Point ``dir`` at the bundle, not
@@ -840,8 +840,9 @@ exactly as it would when the bundle is built standalone.
 
 **What the bundle root is.** In directory mode it is ``dir`` — one root.
 In file-list mode the mount has one root **per listed file**: the parent
-directory of each entry in ``files``. A reference is inside the bundle when
-it is under **any** of them.
+directory of each entry in ``files``, with duplicates collapsed (several
+entries in one directory contribute one root) and ``files`` order preserved.
+A reference is inside the bundle when it is under **any** of them.
 
 That union is deliberately bounded on both sides:
 

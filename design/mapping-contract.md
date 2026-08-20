@@ -403,7 +403,9 @@ implement neither.
 
 The union of the listed parents is a strict superset of the first rule (so the
 asymmetry stays fixed) and a strict subset of the second (so no directory the
-user did not name is ever admitted).
+user did not name is ever admitted — noting that a file listed at the
+filesystem root therefore names `/` as its root, which is the widest a
+correctly-implemented root set can get).
 Listing files from unrelated trees widens the bundle by exactly those trees'
 directories, and by nothing else.
 There is no failure case to report: a set of one or more parents always exists,
