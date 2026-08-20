@@ -133,10 +133,16 @@ class TestListedRoots:
     def test_disjoint_branches_stay_disjoint(self) -> None:
         """Unrelated branches contribute exactly themselves. No ancestor is
         computed, so there is no ``ValueError`` case and no fallback to
-        report — the previous implementation needed both."""
-        assert _listed_roots([Path("/opt/a/one.rst"), Path("/var/b/two.rst")]) == (
+        report — the previous implementation needed both.
+
+        ``/usr`` rather than ``/var``: the helper resolves each parent, and
+        on macOS ``/var`` is a symlink to ``/private/var``, so a fabricated
+        ``/var`` path resolves to a different root there and the equality
+        fails on that platform alone.
+        """
+        assert _listed_roots([Path("/opt/a/one.rst"), Path("/usr/b/two.rst")]) == (
             Path("/opt/a"),
-            Path("/var/b"),
+            Path("/usr/b"),
         )
 
 
