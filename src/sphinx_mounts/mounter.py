@@ -567,14 +567,34 @@ def install_mount_aware_project(
 ) -> _MountAwareProject:
     """Build a :class:`_MountAwareProject` carrying state from ``app_project``.
 
-    The original docname/path dictionaries are copied across so that any
-    state populated by Sphinx between construction and now is preserved.
+    Every attribute of ``app_project`` travels across, so that state Sphinx
+    populated between construction and now is preserved. It is copied
+    wholesale rather than field by field on purpose: this is a hand-rolled
+    copy-constructor over a class this extension does not own, and a field
+    added to :class:`~sphinx.project.Project` by a future Sphinx would
+    otherwise be dropped silently — the worst failure mode available, since
+    the resulting project would look complete and simply be missing
+    something.
+
+    The three fields this subclass owns are excluded (the constructor has
+    just set them, and they are per-mount state that has nothing to do with
+    the project being replaced), and the docname/path dictionaries are
+    re-copied afterwards so the new project does not share mutable
+    containers with the old one.
+
+    ``vars()`` is read defensively: if a future ``Project`` were to define
+    ``__slots__`` it would have no ``__dict__``, and falling back to the
+    explicit copy below is better than raising inside someone's build.
     """
     new = _MountAwareProject(
         app_project.srcdir,
         app_project.source_suffix,
         mounts,
     )
+    owned = {"_mounts", "_doc_roots", "_mount_entry_docnames"}
+    for name, value in getattr(app_project, "__dict__", {}).items():
+        if name not in owned:
+            setattr(new, name, value)
     new.docnames = set(app_project.docnames)
     new._docname_to_path = dict(app_project._docname_to_path)
     new._path_to_docname = dict(app_project._path_to_docname)

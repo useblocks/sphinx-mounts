@@ -6,9 +6,15 @@ import os
 from pathlib import Path
 
 import pytest
+from sphinx.project import Project
 
 from sphinx_mounts.config import MountConfig
-from sphinx_mounts.mounter import _files_bundle_root, _is_within, _join_mount
+from sphinx_mounts.mounter import (
+    _files_bundle_root,
+    _is_within,
+    _join_mount,
+    install_mount_aware_project,
+)
 
 
 class TestJoinMount:
@@ -123,3 +129,72 @@ class TestFilesBundleRoot:
         files = [Path("/abs/one.rst"), Path("rel/two.rst")]
         mount = self._mount("/abs/one.rst", "rel/two.rst")
         assert _files_bundle_root(files, mount, 0) is None
+
+
+class TestInstallMountAwareProject:
+    """The swap-in copy-constructor over a class this extension does not own."""
+
+    @staticmethod
+    def _stock(tmp_path: Path) -> Project:
+        project = Project(tmp_path, (".rst",))
+        project.docnames.add("index")
+        project._docname_to_path["index"] = Path("index.rst")
+        project._path_to_docname[Path("index.rst")] = "index"
+        return project
+
+    def test_known_state_travels(self, tmp_path: Path) -> None:
+        stock = self._stock(tmp_path)
+        new = install_mount_aware_project(stock, ())
+        assert new.docnames == {"index"}
+        assert new._docname_to_path == {"index": Path("index.rst")}
+        assert new._path_to_docname == {Path("index.rst"): "index"}
+        assert new.source_suffix == (".rst",)
+
+    def test_unknown_attributes_travel_too(self, tmp_path: Path) -> None:
+        """A field a future Sphinx adds to ``Project`` must not be dropped.
+
+        This is a hand-rolled copy-constructor over an upstream class, so
+        enumerating fields by name means a new one disappears silently — the
+        worst failure mode available, because the resulting project looks
+        complete and is simply missing something. Copying wholesale makes
+        unknown state travel by default.
+        """
+        stock = self._stock(tmp_path)
+        stock.a_field_from_a_future_sphinx = "carry me"  # type: ignore[attr-defined]
+        new = install_mount_aware_project(stock, ())
+        assert new.a_field_from_a_future_sphinx == "carry me"
+
+    def test_docname_containers_are_not_shared_with_the_old_project(
+        self, tmp_path: Path
+    ) -> None:
+        """The copy must not alias the old project's mutable containers.
+
+        ``discover()`` clears and repopulates all three on the new project;
+        aliasing would reach back into the object being replaced.
+        """
+        stock = self._stock(tmp_path)
+        new = install_mount_aware_project(stock, ())
+        new.docnames.add("extra")
+        new._docname_to_path["extra"] = Path("extra.rst")
+        new._path_to_docname[Path("extra.rst")] = "extra"
+        assert stock.docnames == {"index"}
+        assert "extra" not in stock._docname_to_path
+        assert Path("extra.rst") not in stock._path_to_docname
+
+    def test_mount_state_is_not_taken_from_the_old_project(
+        self, tmp_path: Path
+    ) -> None:
+        """Fields this subclass owns come from the constructor, never from the
+        project being replaced — even if that project happens to carry
+        same-named attributes (a second ``builder-inited``, say)."""
+        stock = self._stock(tmp_path)
+        stock._mounts = ("stale",)  # type: ignore[attr-defined]
+        stock._doc_roots = {"stale": "stale"}  # type: ignore[attr-defined]
+        stock._mount_entry_docnames = {0: ["stale"]}  # type: ignore[attr-defined]
+
+        mount = MountConfig(dir=tmp_path, mount_at="_g/m")
+        new = install_mount_aware_project(stock, (mount,))
+
+        assert new._mounts == (mount,)
+        assert new._doc_roots == {}
+        assert new._mount_entry_docnames == {}
