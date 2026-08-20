@@ -54,7 +54,7 @@ Unreleased
 
    Rationale: every other mount-specific problem in this extension is a typed,
    suppressible warning that ``-W`` escalates, and
-   :mod:`sphinx_mounts.logging` states that as the doctrine — an escaping
+   ``sphinx_mounts.logging`` states that as the doctrine — an escaping
    reference is no different. The hard default also promised more than its
    placement can deliver: the check runs from ``env-check-consistency``, which
    Sphinx skips entirely on a build that reads no document, so it was never a
