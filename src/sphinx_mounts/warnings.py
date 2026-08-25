@@ -67,6 +67,7 @@ from __future__ import annotations
 import logging as stdlib_logging
 import posixpath
 from typing import TYPE_CHECKING
+import weakref
 
 import sphinx.directives.other
 import sphinx.environment.adapters.toctree
@@ -142,10 +143,35 @@ class DowngradeFilter(stdlib_logging.Filter):
     :param excluded: Docname -> the label of the rule that removed it.
     """
 
-    def __init__(self, excluded: Mapping[str, str]) -> None:
+    def __init__(
+        self,
+        excluded: Mapping[str, str],
+        logger_names: tuple[str, ...],
+        owner: object,
+    ) -> None:
         super().__init__()
         self._excluded = dict(excluded)
         self._docnames = sorted(self._excluded)
+        #: The names this instance was actually installed on. Matched against
+        #: ``record.name`` for the type-less 7.4 glob arm rather than the
+        #: fallback constant — hard-coding the string there would defeat the
+        #: very indirection :func:`resolve_toctree_logger_names` exists for,
+        #: and would be correct only for as long as resolved == fallback.
+        self._logger_names = tuple(logger_names)
+        #: Which application installed this filter. The loggers are
+        #: process-global and a ``Sphinx`` application is not, so removal has
+        #: to be able to say "mine" — otherwise a rule-less application strips
+        #: a live one's filter on its way past.
+        self.owner_id = id(owner)
+        self._owner = weakref.ref(owner)
+
+    def owned_by(self, owner: object) -> bool:
+        """Whether ``owner`` is the application that installed this filter."""
+        return self.owner_id == id(owner)
+
+    def orphaned(self) -> bool:
+        """Whether the installing application has been collected."""
+        return self._owner() is None
 
     def filter(self, record: stdlib_logging.LogRecord) -> bool:
         """Always ``True``. Recognised records are mutated, never dropped.
@@ -195,7 +221,7 @@ class DowngradeFilter(stdlib_logging.Filter):
         return (
             warning_type is None
             and subtype is None
-            and record.name in FALLBACK_LOGGER_NAMES
+            and record.name in self._logger_names
             and any(char in target for char in _GLOB_CHARS)
         )
 
@@ -240,36 +266,55 @@ def _downgrade(
 
 def install_downgrade_filter(
     excluded: Mapping[str, str],
+    owner: object,
 ) -> tuple[DowngradeFilter, tuple[str, ...], tuple[str, ...]]:
-    """Attach a fresh :class:`DowngradeFilter` to the emitting child loggers.
+    """Attach a fresh :class:`DowngradeFilter` for ``owner``.
 
-    Any filter this function installed earlier is removed first, so a second
-    ``config-inited`` (a Sphinx test harness reusing a process, an application
-    rebuilt in-process) cannot leave a stale attribution set behind.
+    ``owner`` is the ``Sphinx`` application the attribution belongs to. Only
+    that application's own filter is replaced, plus any whose application has
+    since been collected — so a second application starting up cannot silently
+    take over, or discard, a live one's attribution.
 
     :return: ``(filter, logger names, names that fell back)``.
     """
     names, degraded = resolve_toctree_logger_names()
-    installed = DowngradeFilter(excluded)
+    installed = DowngradeFilter(excluded, names, owner)
     for name in names:
         logger = stdlib_logging.getLogger(name)
         for existing in list(logger.filters):
-            if isinstance(existing, DowngradeFilter):
+            if isinstance(existing, DowngradeFilter) and (
+                existing.owned_by(owner) or existing.orphaned()
+            ):
                 logger.removeFilter(existing)
         logger.addFilter(installed)
     return installed, names, degraded
 
 
-def remove_downgrade_filters() -> None:
-    """Detach every :class:`DowngradeFilter` from the emitting child loggers.
+def remove_downgrade_filters(owner: object | None = None) -> None:
+    """Detach this application's :class:`DowngradeFilter` from the loggers.
 
-    The loggers are process-global while a ``Sphinx`` application is not, so a
-    project whose rules all hold — or which stops declaring rules — must be
-    able to take the filter back off.
+    The loggers are **process-global** while a ``Sphinx`` application is not,
+    and that gap is a real one rather than a tidiness concern. Two things go
+    wrong without it, and both were measured in review:
+
+    * a build that leaves its filter attached silences the NEXT build's
+      genuine warnings and attributes them to a rule in a **different
+      project** — with ``_warncount`` one lower, so a ``-W`` build that should
+      fail passes. Anyone driving Sphinx as a library meets this:
+      ``sphinx-autobuild``, a multi-project script, a test harness;
+    * a rule-less application calling this on its way past used to strip a
+      filter that a *live* application had installed.
+
+    Passing ``owner`` removes only that application's filter — plus any whose
+    application has been collected, so a long-lived process cannot accumulate
+    them. Passing nothing removes every one, which is what a test harness
+    wants and what a shutdown path can safely do.
     """
     names, _ = resolve_toctree_logger_names()
-    for name in (*names, *FALLBACK_LOGGER_NAMES):
+    for name in dict.fromkeys((*names, *FALLBACK_LOGGER_NAMES)):
         logger = stdlib_logging.getLogger(name)
         for existing in list(logger.filters):
-            if isinstance(existing, DowngradeFilter):
+            if not isinstance(existing, DowngradeFilter):
+                continue
+            if owner is None or existing.owned_by(owner) or existing.orphaned():
                 logger.removeFilter(existing)

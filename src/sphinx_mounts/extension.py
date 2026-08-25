@@ -1247,15 +1247,15 @@ def _on_install_variant_filter(app: Sphinx) -> None:
     """
     state: _VariantState | None = getattr(app, _VARIANT_STATE_KEY, None)
     if state is None:
-        mount_warnings.remove_downgrade_filters()
+        mount_warnings.remove_downgrade_filters(app)
         return
     suffixes = tuple(app.project.source_suffix)
     excluded = _host_excluded_docnames(app, state, suffixes)
     excluded.update(_mount_excluded_docnames(state, suffixes))
     if not excluded:
-        mount_warnings.remove_downgrade_filters()
+        mount_warnings.remove_downgrade_filters(app)
         return
-    _, names, degraded = mount_warnings.install_downgrade_filter(excluded)
+    _, names, degraded = mount_warnings.install_downgrade_filter(excluded, app)
     if degraded:
         msg = (
             f"sphinx-mounts: could not resolve the emitting toctree logger(s) "
@@ -1271,6 +1271,11 @@ def _on_install_variant_filter(app: Sphinx) -> None:
         len(excluded),
         list(names),
     )
+
+
+def _on_remove_variant_filter(app: Sphinx, _exception: Exception | None) -> None:
+    """Detach this application's downgrade filter when its build ends."""
+    mount_warnings.remove_downgrade_filters(app)
 
 
 def _host_excluded_docnames(
@@ -1448,6 +1453,12 @@ def setup(app: Sphinx) -> dict[str, Any]:
     # After ``_on_builder_inited``, because the docname derivation reads the
     # project's registered source suffixes.
     app.connect("builder-inited", _on_install_variant_filter, priority=600)
+    # The emitting loggers are process-global and this application is not, so
+    # the filter comes off when the build ends. Without it, the NEXT build in
+    # the same process — sphinx-autobuild, a multi-project script, a test
+    # harness — has its own genuine toctree warnings silenced and attributed
+    # to a rule in a different project, with `_warncount` one lower.
+    app.connect("build-finished", _on_remove_variant_filter)
     # Must run before the read phase: it is what makes an ``attach_to`` host
     # doc be re-read when a mount's set of wired entries changed, which is
     # the only way ``_on_doctree_read`` gets a chance to fix the wiring.

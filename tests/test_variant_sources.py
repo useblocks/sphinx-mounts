@@ -799,6 +799,64 @@ def test_the_root_document_guard_sees_an_extension_registered_suffix(
     assert "unable to load the master document" not in message
 
 
+def test_a_second_build_in_one_process_keeps_its_own_warnings(make_app, tmp_path):
+    """The cross-application leak, end to end and in one process.
+
+    Project A gates ``hostgated`` by a false rule. Project B is a different
+    project with no ``ubproject.toml`` at all, whose index names a genuinely
+    missing ``hostgated``. If A's filter is still attached when B builds, B's
+    broken reference is silenced and attributed to a rule in a project it has
+    never heard of — and ``_warncount`` drops by one, so a ``-W`` build that
+    should fail passes.
+
+    The two builds share a test function on purpose: the module's autouse
+    detach fixture must not run between them, or the production code being
+    tested is never the thing under test.
+    """
+    a_toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir_a, _ = make_project(tmp_path / "a", toml=a_toml)
+    app_a = _build(make_app, confdir_a)
+    assert "hostgated.html" not in _pages(app_a)
+    assert mount_warnings.VARIANT_EXCLUDED_CODE in app_a._status.getvalue()
+    assert _attribution() == {}, "the filter comes off when A's build ends"
+
+    root_b = tmp_path / "b"
+    (root_b / "proj").mkdir(parents=True)
+    _write(
+        root_b / "proj" / "conf.py",
+        """
+        project = "b"
+        author = "tests"
+        extensions = ["sphinx_mounts"]
+        master_doc = "index"
+    """,
+    )
+    _write(
+        root_b / "proj" / "index.rst",
+        """
+        B
+        =
+
+        .. toctree::
+
+           hostgated
+    """,
+    )
+    app_b = _build(make_app, root_b / "proj")
+    warning = app_b._warning.getvalue()
+    assert "hostgated" in warning
+    assert "WARNING" in warning, "B's genuine broken reference must survive"
+    assert mount_warnings.VARIANT_EXCLUDED_CODE not in warning
+    assert app_b._warncount >= 1
+
+
 def test_the_filter_loggers_resolve_from_sphinx_itself(make_app, tmp_path):
     """The seam is derived from Sphinx's own modules, not hard-coded.
 

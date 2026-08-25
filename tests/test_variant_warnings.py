@@ -67,9 +67,21 @@ def _record(
     return record
 
 
+#: The names the filter is actually installed on, resolved from Sphinx's own
+#: modules. Record-level tests build their records with THESE, not with
+#: :data:`FALLBACK_LOGGER_NAMES` — pinning the fallback constant would keep the
+#: suite green through exactly the resolved/fallback divergence the indirection
+#: exists to survive.
+RESOLVED_NAMES, _DEGRADED = resolve_toctree_logger_names()
+
+
+class _Owner:
+    """Stands in for the ``Sphinx`` application that owns a filter."""
+
+
 @pytest.fixture
 def downgrade() -> DowngradeFilter:
-    return DowngradeFilter(EXCLUDED)
+    return DowngradeFilter(EXCLUDED, RESOLVED_NAMES, _Owner())
 
 
 @pytest.fixture(autouse=True)
@@ -98,9 +110,11 @@ def test_the_filter_is_attached_to_both_emitting_child_loggers() -> None:
     in the parent, after ``convert_serializable`` has cleared ``record.args``,
     so the attribution silently stops matching.
     """
-    install_downgrade_filter(EXCLUDED)
+    owner = _Owner()
+    install_downgrade_filter(EXCLUDED, owner)
     names, _ = resolve_toctree_logger_names()
     assert set(names) == set(FALLBACK_LOGGER_NAMES)
+    assert names == RESOLVED_NAMES
     for name in names:
         logger = stdlib_logging.getLogger(name)
         assert any(isinstance(f, DowngradeFilter) for f in logger.filters), name
@@ -114,19 +128,43 @@ def test_the_filter_is_attached_to_both_emitting_child_loggers() -> None:
 
 
 def test_reinstalling_replaces_rather_than_stacks() -> None:
-    """A second application in one process must not see a stale attribution."""
-    install_downgrade_filter(EXCLUDED)
-    install_downgrade_filter({"other": "rule"})
-    for name in FALLBACK_LOGGER_NAMES:
+    """One application rebuilding must not leave a stale attribution behind."""
+    owner = _Owner()
+    install_downgrade_filter(EXCLUDED, owner)
+    install_downgrade_filter({"other": "rule"}, owner)
+    for name in RESOLVED_NAMES:
         logger = stdlib_logging.getLogger(name)
         installed = [f for f in logger.filters if isinstance(f, DowngradeFilter)]
         assert len(installed) == 1, name
+        assert installed[0]._excluded == {"other": "rule"}
+
+
+def test_a_second_application_does_not_replace_or_strip_the_first() -> None:
+    """Two applications, two filters, and neither one owns the other's.
+
+    The loggers are process-global and a ``Sphinx`` application is not. Before
+    identity, a second application starting up either took over the first's
+    attribution set, or — if it had no rules of its own — stripped the live
+    one's filter entirely on its way past.
+    """
+    first, second = _Owner(), _Owner()
+    install_downgrade_filter(EXCLUDED, first)
+    install_downgrade_filter({"other": "rule"}, second)
+    logger = stdlib_logging.getLogger(RESOLVED_NAMES[0])
+    installed = [f for f in logger.filters if isinstance(f, DowngradeFilter)]
+    assert len(installed) == 2
+
+    # A rule-less application removes ITS OWN filter and nothing else.
+    remove_downgrade_filters(second)
+    installed = [f for f in logger.filters if isinstance(f, DowngradeFilter)]
+    assert len(installed) == 1
+    assert installed[0].owned_by(first)
 
 
 def test_removal_detaches_from_every_logger() -> None:
-    install_downgrade_filter(EXCLUDED)
+    install_downgrade_filter(EXCLUDED, _Owner())
     remove_downgrade_filters()
-    for name in FALLBACK_LOGGER_NAMES:
+    for name in RESOLVED_NAMES:
         logger = stdlib_logging.getLogger(name)
         assert not any(isinstance(f, DowngradeFilter) for f in logger.filters)
 
@@ -137,7 +175,7 @@ def test_removal_detaches_from_every_logger() -> None:
 
 
 @pytest.mark.parametrize("subtype", ["excluded", "not_readable", "not_included"])
-@pytest.mark.parametrize("name", FALLBACK_LOGGER_NAMES, ids=["read", "resolve"])
+@pytest.mark.parametrize("name", RESOLVED_NAMES, ids=["read", "resolve"])
 def test_an_attributed_docname_is_downgraded(
     downgrade: DowngradeFilter, name: str, subtype: str
 ) -> None:
@@ -165,7 +203,7 @@ def test_an_unattributed_docname_passes_through_untouched(
     for this job.
     """
     record = _record(
-        FALLBACK_LOGGER_NAMES[0], ("nosuchdoc",), warning_type="toc", subtype="excluded"
+        RESOLVED_NAMES[0], ("nosuchdoc",), warning_type="toc", subtype="excluded"
     )
     before = record.getMessage()
     assert downgrade.filter(record) is True
@@ -182,7 +220,7 @@ def test_an_unrelated_warning_from_the_same_logger_is_untouched(
     document a rule removed".
     """
     record = _record(
-        FALLBACK_LOGGER_NAMES[0],
+        RESOLVED_NAMES[0],
         ("hostgated",),
         warning_type="toc",
         subtype="duplicate_entry",
@@ -201,7 +239,7 @@ def test_the_empty_glob_arm_is_downgraded_on_sphinx_8_plus(
     reach this warning upstream either.
     """
     record = _record(
-        FALLBACK_LOGGER_NAMES[0],
+        RESOLVED_NAMES[0],
         ("gated/*",),
         subtype="empty_glob",
         location=_FakeToctree(parent="index"),
@@ -221,7 +259,7 @@ def test_the_empty_glob_arm_is_downgraded_on_sphinx_7_4(
     makes a false positive harmless.
     """
     record = _record(
-        FALLBACK_LOGGER_NAMES[0],
+        RESOLVED_NAMES[0],
         ("gated/*",),
         location=_FakeToctree(parent="index"),
     )
@@ -239,7 +277,7 @@ def test_a_glob_is_resolved_against_the_referring_document(
     rendered path string.
     """
     record = _record(
-        FALLBACK_LOGGER_NAMES[0],
+        RESOLVED_NAMES[0],
         ("binternal",),
         subtype="empty_glob",
         location=_FakeToctree(parent="mnt/index"),
@@ -252,7 +290,7 @@ def test_a_glob_matching_nothing_excluded_is_untouched(
     downgrade: DowngradeFilter,
 ) -> None:
     record = _record(
-        FALLBACK_LOGGER_NAMES[0],
+        RESOLVED_NAMES[0],
         ("elsewhere/*",),
         subtype="empty_glob",
         location=_FakeToctree(parent="index"),
@@ -270,9 +308,7 @@ def test_a_record_with_cleared_args_is_untouched(downgrade: DowngradeFilter) -> 
     reached at that point cannot attribute anything, which is why the
     attachment is on the emitting logger instead.
     """
-    record = _record(
-        FALLBACK_LOGGER_NAMES[0], (), warning_type="toc", subtype="excluded"
-    )
+    record = _record(RESOLVED_NAMES[0], (), warning_type="toc", subtype="excluded")
     record.msg = "toctree contains reference to excluded document 'hostgated'"
     assert downgrade.filter(record) is True
     assert record.levelno == stdlib_logging.WARNING
@@ -282,24 +318,24 @@ def test_the_filter_never_returns_false(downgrade: DowngradeFilter) -> None:
     """Every path, including the ones that change nothing."""
     records = [
         _record(
-            FALLBACK_LOGGER_NAMES[0],
+            RESOLVED_NAMES[0],
             ("hostgated",),
             warning_type="toc",
             subtype="excluded",
         ),
         _record(
-            FALLBACK_LOGGER_NAMES[0],
+            RESOLVED_NAMES[0],
             ("nosuchdoc",),
             warning_type="toc",
             subtype="excluded",
         ),
         _record(
-            FALLBACK_LOGGER_NAMES[1],
+            RESOLVED_NAMES[1],
             ("mnt/binternal",),
             warning_type="toc",
             subtype="not_readable",
         ),
-        _record(FALLBACK_LOGGER_NAMES[0], (), subtype="empty_glob"),
-        _record(FALLBACK_LOGGER_NAMES[0], ("x",), level=stdlib_logging.INFO),
+        _record(RESOLVED_NAMES[0], (), subtype="empty_glob"),
+        _record(RESOLVED_NAMES[0], ("x",), level=stdlib_logging.INFO),
     ]
     assert all(downgrade.filter(record) is True for record in records)
