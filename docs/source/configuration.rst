@@ -1320,7 +1320,11 @@ refused — write ``var.debug == False``. So is a bare ``.upper()`` /
 **Every field reference must be rooted at** ``var``. ``var.edition ==
 'pro'`` is fine; a prefix-less ``edition == 'pro'`` is a configuration
 error, as is any other bare name — ``build_tags`` included, which belongs
-to ``only`` rather than to a variant condition.
+to ``only`` rather than to a variant condition. A field segment starting
+with an underscore (``var._x``) is also refused here — ubCode instead
+evaluates it, fails on the unknown key, and warns while excluding the
+rule's files, so both tools keep the files out of the build and only the
+severity differs.
 
 Both narrowings exist because the same string is read by more than one
 tool, and a form the two would evaluate differently is one rule string

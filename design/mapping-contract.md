@@ -877,9 +877,22 @@ reader must decode the same way.
 
 **A declared divergence in the fail-CLOSED direction.** `ws` includes a newline
 (:119), so a condition split across lines is derivable there; Python cannot
-parse a bare newline in an expression, so this reader refuses it. Parenthesised,
-both accept. The build stops here and succeeds there — no leak, but a
-difference, recorded rather than discovered.
+parse a bare newline in an expression, so this reader refuses it. The same
+divergence fires for a raw newline INSIDE a string literal, which
+`string_single_char` / `string_double_char` (:99-102, `ANY`-based) admit there
+and Python's single-quoted literals cannot contain. Parenthesised
+(or, for the literal, spelled `\n`), both accept. The build stops here and
+succeeds there — no leak, but a difference, recorded rather than discovered.
+
+**A second declared divergence, same direction: leading-underscore fields.**
+`id_start` (:81) admits `_`, so `var._x == 1` is derivable there — ubCode
+evaluates it, fails on the unknown key, warns and EXCLUDES the rule's files.
+This reader refuses the spelling outright (a hard configuration error; see
+`_refuse_bare_name`), because an underscore-led attribute is the doorway every
+Python sandbox escape walks through and the grammar is the right place to bar
+it. Both engines end with the files out of the build; the severity differs —
+the build stops here and warns there. Variant data keys are ordinary names, so
+nothing legitimate is lost.
 
 #### Table 2 — the comparison semantics
 
