@@ -39,6 +39,7 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 #: Leaf value types the variant data may hold.
@@ -364,8 +365,12 @@ def _literal_value(node: ast.AST) -> Any:
 
 
 def _scalar_list(text: str, node: ast.AST) -> list[ast.AST] | None:
-    """Return the elements of a list literal of scalars, or ``None``."""
-    if not isinstance(node, ast.List | ast.Tuple):
+    """Return the elements of a list literal of scalars, or ``None``.
+
+    A ``(…)`` tuple is deliberately not one: ubCode's grammar has a
+    ``list_literal`` rule and no tuple rule at all.
+    """
+    if not isinstance(node, ast.List):
         return None
     for element in node.elts:
         if _literal_kind(text, element) is None:
@@ -593,6 +598,244 @@ def _validate_boolean(text: str, node: ast.AST) -> None:
     _refuse_non_boolean(node)
 
 
+# ---------------------------------------------------------------------------
+# TABLE 1b — the LEXICAL layer
+# ---------------------------------------------------------------------------
+#
+# The kind-level table above is necessary and NOT sufficient. Python's
+# tokenizer normalises away spellings ubCode's lexer refuses outright, so a
+# validator working from the `ast` alone keeps finding new members of one
+# class: `0x2` and `2_0` and `.5` all become plain numbers, `'Wid' 'get'`
+# becomes one string, `'a\x74'` becomes `'at'`, and every one of `not(x)`,
+# `x and(y)`, `var . name`, `.upper( )`, `in['pro']` and `['pro',]` parses
+# identically to its spaced or comma-less twin.
+#
+# Every cell below was measured against the shipped engine, and every one is in
+# the LEAK direction: ubCode refuses, which makes the rule permanently false and
+# EXCLUDES its files, while an AST-only reader evaluates and keeps them.
+#
+# The rules, read off `rust/ubc_query/src/py_expr.pest`:
+#
+#   * `not_expr = not_keyword ~ ws+ ~ expr`, and `and`/`or`/`in`/`is` all sit
+#     between `ws+` on BOTH sides. So `not(`, `and(`, `)or(`, `in[`, `2and`
+#     and `'net'in` are parse errors there. Comparison operators are the
+#     exception — `comparison_expr` uses `ws*`, so `var.count>=2` is fine.
+#   * `var_field = symbolic_name_simple ~ ("." ~ symbolic_name_simple …)` and
+#     `var_field_with_upper = var_field ~ (".upper()")` admit NO whitespace, so
+#     `var . name`, `var. name` and `.upper( )` are refused.
+#   * `str_predicate_method = "." ~ name ~ "(" ~ string_literal ~ ")"` — no
+#     whitespace inside the parens and no trailing comma.
+#   * `list_literal` has no trailing comma and there is no `(...)` tuple form,
+#     though `[ 'a' , 'b' ]` is fine (`ws*` between the parts).
+#   * `integer_literal = "-"? ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*)`,
+#     `decimal_literal = integer ~ "." ~ ASCII_DIGIT*`, `exp = ^"E" ~ integer`
+#     — decimal only, no `_` separators, and a fraction needs a leading digit.
+#   * strings are decoded by `common.rs::process_escape_sequences`, which knows
+#     `\n \t \r \b \f \v \a \0 \\ \' \"` and leaves everything else as a literal
+#     backslash. Python decodes `\x41`, `\101`, `\u0041` too. Rather than refuse
+#     those — ubCode ACCEPTS them, it just reads a different string — the
+#     literal is re-decoded ubCode's way and written back onto the tree, so the
+#     interpreter stays a pure function of the tree and the two engines compare
+#     the same characters.
+
+#: ubCode's numeral shapes, transcribed from the three pest rules.
+_NUMERAL = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]*)?(?:[eE]-?(?:0|[1-9][0-9]*))?\Z")
+
+#: The escapes `process_escape_sequences` decodes. Anything else keeps its
+#: backslash, which is where it parts company with Python.
+_UBCODE_ESCAPES = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    "b": "\b",
+    "f": "\f",
+    "v": "\v",
+    "a": "\a",
+    "0": "\0",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+}
+
+#: Keywords pest surrounds with `ws+`. Comparison operators are deliberately
+#: absent: they sit between `ws*` and need no spacing.
+_SPACED_KEYWORDS = ("and", "or", "in", "is", "not")
+
+
+def _ubcode_unescape(raw: str) -> str:
+    """Decode a string literal's body the way ubCode's lexer does."""
+    if "\\" not in raw:
+        return raw
+    out: list[str] = []
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char != "\\" or index + 1 >= len(raw):
+            out.append(char)
+            index += 1
+            continue
+        following = raw[index + 1]
+        decoded = _UBCODE_ESCAPES.get(following)
+        # An unrecognised escape keeps its backslash — Python decodes `\x41`
+        # and `\101` and this does not, which is the whole divergence.
+        out.append(decoded if decoded is not None else "\\" + following)
+        index += 2
+    return "".join(out)
+
+
+#: The character string literals are masked with for the keyword scan.
+#:
+#: Deliberately NOT a word character: masking with ``_`` merged the mask into
+#: an adjacent keyword, so ``'pro'and`` scanned as one identifier and the
+#: missing space went unnoticed.
+_MASK = "\x00"
+
+
+def _mask_strings(text: str) -> str:
+    """``text`` with every string literal's characters replaced by :data:`_MASK`.
+
+    The keyword-spacing scan runs over this, so an ``and`` inside a quoted
+    string cannot be mistaken for the operator.
+    """
+    out: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            out.append(_MASK)
+            if char == "\\" and index + 1 < len(text):
+                out.append(_MASK)
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            out.append(_MASK)
+            index += 1
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _check_keyword_spacing(text: str) -> None:
+    """Require the whitespace pest requires around the word operators."""
+    masked = _mask_strings(text)
+    for match in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", masked):
+        word = match.group()
+        if word not in _SPACED_KEYWORDS:
+            continue
+        start, end = match.span()
+        before = masked[start - 1] if start else ""
+        after = masked[end] if end < len(masked) else ""
+        # `not` may open an expression or follow `(`; every other keyword sits
+        # between two operands and needs whitespace on both sides.
+        opens = word == "not" and before in {"", "("}
+        if not (opens or before.isspace()):
+            _refuse_spacing(word, "before")
+        if after and not after.isspace():
+            _refuse_spacing(word, "after")
+        if not after and word != "None":
+            _refuse_spacing(word, "after")
+
+
+def _refuse_spacing(word: str, side: str) -> None:
+    msg = (
+        f"`{word}` needs whitespace {side} it. The shared grammar spells the "
+        f"word operators with spaces around them, so `not(…)`, `x and(y)`, "
+        f"`in['a']` and `2and y` are refused there while Python accepts them — "
+        f"one rule string, two document sets. Comparison operators are "
+        f"different: `var.count>=2` is fine"
+    )
+    raise VariantConditionError(msg)
+
+
+def _check_lexical(text: str, node: ast.AST) -> None:
+    """Re-check every literal and every dotted access against ubCode's lexer.
+
+    Walks the validated tree, reads each node's own source segment back, and
+    refuses the spellings the shared grammar has no token for. String literals
+    are additionally re-decoded ubCode's way and written back onto the tree
+    (see the module note above).
+    """
+    _check_keyword_spacing(text)
+    for child in ast.walk(node):
+        segment = ast.get_source_segment(text, child)
+        if segment is None:
+            continue
+        if isinstance(child, ast.Tuple):
+            msg = (
+                "a tuple literal is not part of the shared grammar; write a "
+                "list — `var.field in ['a', 'b']`"
+            )
+            raise VariantConditionError(msg)
+        if isinstance(child, ast.List):
+            _check_list_spelling(segment)
+        elif isinstance(child, ast.Attribute):
+            _check_dotted_spelling(segment)
+        elif isinstance(child, ast.Call):
+            _check_call_spelling(segment)
+        elif isinstance(child, ast.Constant):
+            _check_constant_spelling(child, segment)
+
+
+def _check_list_spelling(segment: str) -> None:
+    """No trailing comma: ubCode's `list_literal` has no rule for one."""
+    body = segment.strip()
+    if body.startswith("[") and body.endswith("]") and body[1:-1].strip().endswith(","):
+        msg = (
+            "a trailing comma in a list literal is not part of the shared "
+            "grammar — most formatters add one, and it is refused there while "
+            "Python ignores it; remove it"
+        )
+        raise VariantConditionError(msg)
+
+
+def _check_dotted_spelling(segment: str) -> None:
+    """No whitespace around a `.`: `var_field` admits none."""
+    if re.search(r"\s\.|\.\s", segment):
+        msg = (
+            "a `var.*` access may not carry whitespace around its dots; write "
+            "`var.field`, not `var . field`"
+        )
+        raise VariantConditionError(msg)
+
+
+def _check_call_spelling(segment: str) -> None:
+    """No whitespace before or inside a method call's parentheses."""
+    if re.search(r"\s\(|\(\s|\s\)", segment) or re.search(r",\s*\)", segment):
+        msg = (
+            "a method call may not carry whitespace inside its parentheses or "
+            "a trailing comma; write `.upper()` and `.startswith('x')`"
+        )
+        raise VariantConditionError(msg)
+
+
+def _check_constant_spelling(node: ast.Constant, segment: str) -> None:
+    """Numerals must match ubCode's shapes; strings are re-decoded its way."""
+    value = node.value
+    if isinstance(value, bool) or value is None:
+        return
+    if isinstance(value, int | float):
+        if not _NUMERAL.match(segment.strip()):
+            msg = (
+                f"`{segment.strip()}` is not a numeral the shared grammar can "
+                f"read: it spells numbers in decimal only, with no `0x` / `0b` "
+                f"/ `0o` base prefix, no `_` separators, and a leading digit "
+                f"before the point (`0.5`, not `.5`)"
+            )
+            raise VariantConditionError(msg)
+        return
+    if isinstance(value, str):
+        body = segment.strip()
+        if len(body) >= _SHORTEST_QUOTED and body[0] in "'\"":
+            node.value = _ubcode_unescape(body[1:-1])
+
+
 def validate(expr: str) -> ast.expr:
     """Parse and whitelist-check a rule condition.
 
@@ -614,6 +857,9 @@ def validate(expr: str) -> ast.expr:
         raise VariantConditionError(msg) from exc
     try:
         _validate_boolean(text, tree.body)
+        # The lexical layer runs last so a form that is outside the grammar
+        # entirely gets the grammar's message rather than a spelling one.
+        _check_lexical(text, tree.body)
     except RecursionError as exc:
         # A deeply nested condition (`not not not …`) blows the walk's stack.
         # The module's discipline is that no input reaches an unhandled

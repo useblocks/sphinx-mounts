@@ -70,6 +70,11 @@ REJECT = _Sentinel("REJECT")
 #: The condition is inside the grammar and fails to EVALUATE, which excludes.
 ERROR = _Sentinel("ERROR")
 
+
+def _row_id(row: tuple[str, Any]) -> str:
+    return f"{row[1]}:{row[0] or '<empty>'}"
+
+
 #: Every row measured against ubCode's shipped engine.
 #:
 #: ``REJECT`` = refused by the grammar; ``ERROR`` = accepted and unevaluable;
@@ -217,8 +222,156 @@ UBCODE_TABLE: list[tuple[str, Any]] = [
 ]
 
 
-def _row_id(row: tuple[str, Any]) -> str:
-    return f"{row[1]}:{row[0] or '<empty>'}"
+#: The LEXICAL layer, measured the same way.
+#:
+#: The kind-level table above is necessary and not sufficient: ubCode's lexer
+#: refuses spellings Python's tokenizer normalises away, and every one of them
+#: was in the LEAK direction — ubCode refuses (so the rule is permanently false
+#: and its files are EXCLUDED) while an AST-only reader evaluates and keeps
+#: them. `var.edition in ['pro',]` and `not(var.edition == 'basic')` are not
+#: exotic: a trailing comma is what most formatters produce, and `not(` is how
+#: a great many people write a negation.
+#:
+#: The accepted rows matter as much as the refused ones. Where pest is
+#: whitespace-tolerant we are identically tolerant — `var.count>=2`,
+#: `[ 'pro' , 'x' ]`, doubled spaces and tabs are all fine — so this is parity
+#: rather than a blanket tightening.
+LEXICAL_TABLE: list[tuple[str, Any]] = [
+    ("not(var.edition == 'basic')", REJECT),
+    ("not (var.edition == 'basic')", True),
+    ("not  var.debug == False", False),
+    ("var.count == 2 and(var.debug == False)", REJECT),
+    ("var.count == 2 and (var.debug == False)", True),
+    ("var.edition=='pro'and var.count==2", REJECT),
+    ("var.count == 2and var.debug == False", REJECT),
+    ("var.count == 2 and var.debug == False", True),
+    ("(var.count == 2)or(var.debug == False)", REJECT),
+    ("(var.count == 2) or (var.debug == False)", True),
+    ("var.edition in['pro']", REJECT),
+    ("var.edition in ['pro']", True),
+    ("var.edition not in['x']", REJECT),
+    ("'net'in var.build.features", REJECT),
+    ("var.edition is None", False),
+    ("var.edition isNone", REJECT),
+    ("var.name.upper( ) == 'WIDGET'", REJECT),
+    ("var.name.upper () == 'WIDGET'", REJECT),
+    ("var.name.upper() == 'WIDGET'", True),
+    ("var.name.startswith( 'Wid' )", REJECT),
+    ("var.name.startswith('Wid' )", REJECT),
+    ("var.name.startswith( 'Wid')", REJECT),
+    ("var.name.startswith('Wid')", True),
+    ("var . name == 'Widget'", REJECT),
+    ("var. name == 'Widget'", REJECT),
+    ("var .name == 'Widget'", REJECT),
+    ("var.name .startswith('Wid')", REJECT),
+    ("var.build .debug == True", REJECT),
+    ("var.edition in ['pro',]", REJECT),
+    ("var.edition in ['pro','x',]", REJECT),
+    ("var.edition in ['pro' ,]", REJECT),
+    ("var.edition in ['pro' , 'x']", True),
+    ("var.edition in [ 'pro' ]", True),
+    ("var.edition in ('pro','x')", REJECT),
+    ("var.edition in ('pro',)", REJECT),
+    ("var.name.startswith('Wid',)", REJECT),
+    ("var.count == 0x2", REJECT),
+    ("var.count == 0X2", REJECT),
+    ("var.count == 0b10", REJECT),
+    ("var.count == 0o2", REJECT),
+    ("var.count == 2_0", REJECT),
+    ("var.count == 1_0", REJECT),
+    ("var.ratio == .5", REJECT),
+    ("var.count == 02", REJECT),
+    ("var.count == 2.", True),
+    ("var.count == 2e1", False),
+    ("var.count == 2E1", False),
+    ("var.ratio == 1.5e0", True),
+    ("var.count == +0", REJECT),
+    ("var.name == 'Widge\\x74'", False),
+    ("var.name == 'Widget'", True),
+    ("var.name.startswith('W\\x69')", False),
+    ("var.name.startswith('W\\151')", False),
+    ("var.name.endswith('ge\\x74')", False),
+    ("var.name == 'Widge\\164'", False),
+    ("var.name == 'Wid\\get'", False),
+    ('var.name == "Widget"', True),
+    ("var.name != 'a\\nb'", True),
+    ("var.name != 'a\\tb'", True),
+    ("var.name != 'a\\\\b'", True),
+    ("var.name != 'a\\'b'", True),
+    ("var.edition=='pro'", True),
+    ("var.count>=2", True),
+    ("var.count >= 2", True),
+    ("var.edition == 'pro'  and  var.count == 2", True),
+    ("var.name.upper()  ==  'WIDGET'", True),
+    ("var.name == 'a\\u0041b'", False),
+    ("var.count == 2.5e-1", False),
+    ("var.count == -0x2", REJECT),
+    ("var.edition == 'pro'\tand\tvar.count == 2", True),
+    ("var.edition\t==\t'pro'", True),
+]
+
+
+# The table deliberately carries escapes Python calls invalid; that IS the
+# divergence being pinned.
+@pytest.mark.filterwarnings("ignore::SyntaxWarning")
+@pytest.mark.parametrize("row", LEXICAL_TABLE, ids=_row_id)
+def test_matches_ubcodes_lexer(row: tuple[str, Any]) -> None:
+    """Reproduce one measured LEXICAL row of ubCode's shipped engine.
+
+    Same instrument as the table above: each spelling was run through the
+    engine itself and its verdict recorded here.
+    """
+    expr, expected = row
+    if expected is REJECT:
+        with pytest.raises(VariantConditionError):
+            validate(expr)
+        return
+    validate(expr)
+    if expected is ERROR:
+        with pytest.raises(VariantEvalError):
+            evaluate(expr, VARIANT_DATA)
+        return
+    assert evaluate(expr, VARIANT_DATA) is expected
+
+
+def test_a_string_literal_is_decoded_ubcodes_way() -> None:
+    """``\\x41`` is a literal backslash-x-4-1 there and an ``A`` in Python.
+
+    ubCode's ``process_escape_sequences`` knows ``\\n \\t \\r \\b \\f \\v \\a \\0 \\\\ \\' \\"``
+    and leaves every other escape with its backslash attached. It ACCEPTS the
+    spelling, so refusing it here would be a divergence of its own — instead
+    the literal is re-decoded its way and written back onto the tree, which
+    keeps the interpreter a pure function of the tree and makes the two engines
+    compare the same characters.
+    """
+    assert evaluate("var.name == 'Widge\\x74'", VARIANT_DATA) is False
+    assert evaluate("var.name == 'Widget'", VARIANT_DATA) is True
+    # The escapes both engines decode identically still work.
+    assert evaluate("var.name != 'a\\nb'", VARIANT_DATA) is True
+    assert evaluate("var.name != 'a\\\\b'", VARIANT_DATA) is True
+
+
+def test_the_lexical_table_covers_every_measured_class() -> None:
+    """A guard against the table being trimmed to whatever happens to pass."""
+    text = " ".join(expr for expr, _ in LEXICAL_TABLE)
+    for spelling in (
+        "not(",
+        "and(",
+        ")or(",
+        "in[",
+        "2and",
+        "upper( )",
+        "var . ",
+        "',]",
+        "('pro'",
+        "0x2",
+        "0b10",
+        "2_0",
+        ".5",
+        "\\x74",
+    ):
+        assert spelling in text, spelling
+    assert len(LEXICAL_TABLE) >= 60
 
 
 @pytest.mark.parametrize("row", UBCODE_TABLE, ids=_row_id)
