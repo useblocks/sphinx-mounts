@@ -583,9 +583,11 @@ def _resolve_toml_setting(app: Sphinx, config: Config) -> str | None:
     The decision is cached on the application, so the deprecation warning fires
     once per build rather than once per reader.
     """
-    cached = getattr(app, _TOML_SETTING_KEY, _UNSET)
-    if cached is not _UNSET:
-        return cached  # type: ignore[return-value]
+    # Boxed in a 1-tuple so that "computed, and the answer was None" is
+    # distinguishable from "not computed yet" without a sentinel type.
+    cached: tuple[str | None] | None = getattr(app, _TOML_SETTING_KEY, None)
+    if cached is not None:
+        return cached[0]
     new_value = getattr(config, "sources_from_toml", DEFAULT_TOML_FILENAME)
     old_value = getattr(config, "mounts_from_toml", DEFAULT_TOML_FILENAME)
     new_explicit = new_value != DEFAULT_TOML_FILENAME
@@ -613,15 +615,8 @@ def _resolve_toml_setting(app: Sphinx, config: Config) -> str | None:
             '["mounts.deprecated_confval"] if you cannot migrate yet.'
         )
         log_warning(logger, msg, "deprecated_confval")
-    setattr(app, _TOML_SETTING_KEY, setting)
+    setattr(app, _TOML_SETTING_KEY, (setting,))
     return setting
-
-
-class _Unset:
-    """Sentinel distinguishing "not computed yet" from a computed ``None``."""
-
-
-_UNSET = _Unset()
 
 
 @dataclass(frozen=True, slots=True)
