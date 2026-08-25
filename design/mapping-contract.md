@@ -663,6 +663,23 @@ pattern matches by file name at every depth, in every tree.
 
 A second implementation must reproduce both translations or knowingly deviate.
 
+**The authored dialect is MODELLED, not executed.** There is no globset for
+Python, so this reader compiles the authored pattern to a regular expression of
+its own. The two *translations* below are checked against the real engines —
+the `ignore` crate's walker and Sphinx's own `get_matching_files` — and the
+tables' expected values were measured against them, so the tables are an
+external oracle. The reference reading beside them is not. A third reader
+should treat the tables as the contract and the model as an implementation
+detail; where they could disagree, the tables win.
+
+Four spellings that the model and the engines read differently are refused
+outright, so the question does not arise for them: an EMPTY pattern and a
+pattern with a TRAILING SEPARATOR (both select nothing here and a whole
+subtree, or everything, in a mount's walk), an absolute path, and — see §12.4 —
+`{a,b}`, `..` and `?` beside a separator. A refusal is also raised for a
+pattern carrying more than six zero-widening `**` components, because the
+Sphinx-side expansion doubles per wildcard.
+
 **Rule glob -> mount `exclude` (gitignore, anchored at the mount's `dir`):**
 
 | Rule glob | Mount `exclude` | Why |
@@ -713,7 +730,7 @@ a build, failing open is the one outcome that must not be possible.
 
 | Refusal | Condition |
 | --- | --- |
-| `mounts.variant_glob_dialect` | a glob using `{a,b}` alternation, climbing with `..`, written as an absolute path, or carrying a `?` in a pattern that also contains a separator |
+| `mounts.variant_glob_dialect` | a glob that is EMPTY or ends with a path separator; uses `{a,b}` alternation; climbs with `..`; is an absolute path; carries a `?` beside a separator; or carries more than six zero-widening `**` components. Every test runs against the pattern with its `[...]` character classes blanked out, because a `?` or a `{` inside a class is a literal character in all three engines |
 | `mounts.variant_layout` | rules are declared but the source root they anchor at is not `srcdir` (§12.7) |
 | `mounts.variant_root_doc` | a rule that is false for this variant would exclude `root_doc` |
 | `mounts.variant_data_unreadable` | the variant data file is missing, undecodable or not a JSON object, and sphinx-needs is not installed to report it itself |

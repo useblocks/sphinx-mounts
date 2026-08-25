@@ -36,6 +36,7 @@ has a test.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import re
 
 #: The two path separators a pattern may be written with. ``\`` is a separator
@@ -49,46 +50,139 @@ def _has_separator(pattern: str) -> bool:
     return any(sep in pattern for sep in _SEPARATORS)
 
 
+#: The most zero-widening ``**`` components a pattern may carry.
+#:
+#: Each leading or interior ``**`` needs a present form and an absent form in
+#: Sphinx's dialect (see :func:`to_exclude_patterns`), so *k* of them produce
+#: 2^*k* patterns — measured at 1,024 patterns / 35 ms for *k* = 10 and 65,536
+#: / 3.2 s for *k* = 16, paid once by discovery and twice by the attribution
+#: diff. Six caps the expansion at 64 and still admits every pattern anyone
+#: writes: a real rule glob carries one such wildcard, occasionally two.
+MAX_ZERO_WIDENING = 6
+
+
+def _refuse_empty(pattern: str, _scan: str) -> str | None:
+    """An empty pattern means two different things to two engines."""
+    if pattern.strip():
+        return None
+    return (
+        "a `variant_sources` glob must not be empty. An empty pattern selects "
+        "nothing in the authored dialect and EVERY file in a mount's walk, so "
+        "one rule string would mean two different document sets inside one "
+        "build; remove the entry, or write the pattern you meant"
+    )
+
+
+def _refuse_trailing_separator(_pattern: str, scan: str) -> str | None:
+    """A trailing separator is the same hazard as the empty pattern."""
+    if not scan.rstrip().endswith(_SEPARATORS):
+        return None
+    return (
+        "a `variant_sources` glob must not end with a path separator. A "
+        "trailing separator selects nothing in the authored dialect and a "
+        "whole subtree in a mount's walk; write `dir/**` for the tree, or "
+        "`dir` for the directory itself"
+    )
+
+
+def _refuse_alternation(_pattern: str, scan: str) -> str | None:
+    if "{" not in scan and "}" not in scan:
+        return None
+    return (
+        "`{a,b}` alternation is not supported in a `variant_sources` glob (it "
+        "is alternation for one engine and three literal characters for "
+        "another, so one pattern would select two different file sets); write "
+        "one pattern per alternative"
+    )
+
+
+def _refuse_climb(_pattern: str, scan: str) -> str | None:
+    if not any(segment.strip() == ".." for segment in re.split(r"[/\\]", scan)):
+        return None
+    return (
+        "a `variant_sources` glob must not climb out of the project with "
+        "`..`; gate files inside the project, and gate an external tree from "
+        "the mount that contributes it"
+    )
+
+
+def _refuse_absolute(pattern: str, _scan: str) -> str | None:
+    if not (pattern.startswith(_SEPARATORS) or re.match(r"^[A-Za-z]:[/\\]", pattern)):
+        return None
+    return (
+        "a `variant_sources` glob is relative to the project, so it must not "
+        "be an absolute path; drop the leading separator and write the pattern "
+        "relative to the folder holding `ubproject.toml`"
+    )
+
+
+def _refuse_expansion(_pattern: str, scan: str) -> str | None:
+    """Refuse a pattern whose Sphinx-side expansion would be unbounded.
+
+    See :data:`MAX_ZERO_WIDENING` for the number and the measurement behind it.
+    """
+    segments = _segments(scan.replace("\\", "/"))
+    widening = sum(
+        1
+        for index, segment in enumerate(segments)
+        if segment == "**" and index != len(segments) - 1
+    )
+    if widening <= MAX_ZERO_WIDENING:
+        return None
+    return (
+        f"a `variant_sources` glob may carry at most {MAX_ZERO_WIDENING} `**` "
+        f"path components before the last one; this has {widening}. Each one "
+        f"has to be emitted in a present and an absent form for Sphinx's "
+        f"matcher, so the cost doubles per wildcard — collapse the adjacent "
+        f"ones (`**/**` is `**`) or name the path"
+    )
+
+
+def _refuse_question(_pattern: str, scan: str) -> str | None:
+    if "?" not in scan or not _has_separator(scan):
+        return None
+    return (
+        "`?` may cross a path separator in one engine and not in another, so a "
+        "`?` in a pattern that also contains a path separator has no faithful "
+        "spelling for every reader; write the path segment out in full, or use "
+        "`**`"
+    )
+
+
+#: The fence, in order. Each entry takes ``(pattern, scan)`` and returns a
+#: reason or ``None``; ``scan`` is the pattern with its ``[...]`` character
+#: classes blanked out, because a ``?`` or a ``{`` inside a class is a literal
+#: character in all three engines and refusing it would abort a build over a
+#: pattern with no hazard in it at all.
+_REFUSALS: tuple[Callable[[str, str], str | None], ...] = (
+    _refuse_empty,
+    _refuse_trailing_separator,
+    _refuse_alternation,
+    _refuse_climb,
+    _refuse_absolute,
+    _refuse_expansion,
+    _refuse_question,
+)
+
+
 def refuse(pattern: str) -> str | None:
     """Return why ``pattern`` is refused, or ``None`` when it is usable.
 
-    Four spellings are refused. Every one of them **refuses the whole
-    configuration** rather than skipping its rule: dropping a rule leaves every
-    file it named — including the files its *valid* patterns named — in the
-    build, behind a diagnostic a project could silence. For a key whose only
-    purpose is keeping content out of a build, failing open is the one outcome
-    that must not be possible.
+    Every refusal **refuses the whole configuration** rather than skipping its
+    rule: dropping a rule leaves every file it named — including the files its
+    *valid* patterns named — in the build, behind a diagnostic a project could
+    silence. For a key whose only purpose is keeping content out of a build,
+    failing open is the one outcome that must not be possible.
 
     The refusal is variant-**independent**: a pattern this key cannot interpret
     is unusable in every variant, so it is checked before any condition is
     evaluated. (The root-document refusal is the variant-dependent one.)
     """
-    if "{" in pattern or "}" in pattern:
-        return (
-            "`{a,b}` alternation is not supported in a `variant_sources` glob "
-            "(it is alternation for one engine and three literal characters "
-            "for another, so one pattern would select two different file "
-            "sets); write one pattern per alternative"
-        )
-    if any(segment.strip() == ".." for segment in re.split(r"[/\\]", pattern)):
-        return (
-            "a `variant_sources` glob must not climb out of the project with "
-            "`..`; gate files inside the project, and gate an external tree "
-            "from the mount that contributes it"
-        )
-    if pattern.startswith(_SEPARATORS) or re.match(r"^[A-Za-z]:[/\\]", pattern):
-        return (
-            "a `variant_sources` glob is relative to the project, so it must "
-            "not be an absolute path; drop the leading separator and write the "
-            "pattern relative to the folder holding `ubproject.toml`"
-        )
-    if "?" in pattern and _has_separator(pattern):
-        return (
-            "`?` may cross a path separator in one engine and not in another, "
-            "so a `?` in a pattern that also contains a path separator has no "
-            "faithful spelling for every reader; write the path segment out in "
-            "full, or use `**`"
-        )
+    scan = _outside_classes(pattern)
+    for check in _REFUSALS:
+        reason = check(pattern, scan)
+        if reason is not None:
+            return reason
     return None
 
 

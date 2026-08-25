@@ -670,6 +670,60 @@ def test_a_refused_glob_refuses_the_configuration(
         _build(make_app, confdir)
 
 
+@pytest.mark.parametrize(
+    "pattern", ["", "docs/", "**/", "docs/**/"], ids=["empty", "dir", "any", "deep"]
+)
+def test_a_pattern_that_means_two_things_is_refused_before_it_wipes_a_mount(
+    make_app, tmp_path, pattern: str
+):
+    """The refusal that costs the most if it is missing.
+
+    An empty pattern — a typo, a trailing comma, a templated value that came
+    out blank — selects NOTHING under the authored dialect and EVERY file in a
+    mount's walk. Before this refusal, ``files = [""]`` deleted an entire
+    mounted bundle, left the host untouched, and reported ``build succeeded``
+    with no warning at all: one rule string producing two document sets inside
+    a single build, which is the exact hazard the dialect layer exists to
+    remove. A trailing separator is the same shape, one subtree smaller.
+    """
+    toml = f"""
+    [[source.mounts]]
+    dir = "{{bundle}}"
+    mount_at = "mnt"
+
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["{pattern}"]
+
+    [needs.variant_data]
+    edition = "pro"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml)
+    with pytest.raises(Exception, match="variant_glob_dialect"):
+        _build(make_app, confdir)
+
+
+def test_a_literal_bracketed_wildcard_is_not_refused(make_app, tmp_path):
+    """A ``?`` inside a character class is a literal in all three engines.
+
+    Refusing it would abort every build of a project over a pattern that
+    carries no hazard at all, which is the cost of testing the raw string
+    rather than the pattern with its classes blanked out.
+    """
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["gated/[?]missing.rst", "hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml)
+    app = _build(make_app, confdir)
+    assert "hostgated.html" not in _pages(app)
+    assert "hostkeep.html" in _pages(app)
+
+
 def test_every_refused_glob_is_listed_at_once(make_app, tmp_path):
     """Fixing one refusal only to meet the next on the following build is the
     experience this avoids, and it is cheap to avoid: the check is a pure
