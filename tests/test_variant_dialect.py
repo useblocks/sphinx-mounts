@@ -15,7 +15,13 @@ from pathlib import Path
 import pytest
 from sphinx.util.matching import get_matching_files
 
-from sphinx_mounts.dialect import matches, refuse, to_exclude_patterns, to_gitignore
+from sphinx_mounts.dialect import (
+    MAX_ZERO_WIDENING,
+    matches,
+    refuse,
+    to_exclude_patterns,
+    to_gitignore,
+)
 from sphinx_mounts.mounter import _build_walker
 
 # ---------------------------------------------------------------------------
@@ -37,6 +43,17 @@ from sphinx_mounts.mounter import _build_walker
         ("C:/abs/path.rst", "absolute"),
         ("dir/a?c.rst", "?"),
         ("a?c/x.rst", "?"),
+        # An empty or trailing-separator pattern means NOTHING in the authored
+        # dialect and EVERYTHING (or a whole subtree) in a mount's walk — the
+        # same rule string, two document sets, inside one build.
+        ("", "empty"),
+        ("   ", "empty"),
+        ("docs/", "path separator"),
+        ("**/", "path separator"),
+        ("docs/**/", "path separator"),
+        ("docs\\", "path separator"),
+        # 2^k expansion on the host arm; see MAX_ZERO_WIDENING.
+        ("**/" * 7 + "x.rst", "at most"),
         # Accepted spellings, for the negative half of the fence.
         ("reference/pro/**/*.rst", None),
         ("internal.rst", None),
@@ -45,6 +62,14 @@ from sphinx_mounts.mounter import _build_walker
         ("docs/[ab]/*.rst", None),
         ("docs/./a.rst", None),
         ("docs/a..b.rst", None),
+        # A `?` or a `{` INSIDE a character class is a literal character in all
+        # three engines, so refusing it would abort a build over a pattern with
+        # no hazard in it at all.
+        ("docs/[?]x.rst", None),
+        ("[{]abc.rst", None),
+        ("docs/[}]x.rst", None),
+        ("docs/[.][.]x.rst", None),
+        ("**/" * 6 + "x.rst", None),
     ],
     ids=lambda value: str(value),
 )
@@ -71,6 +96,33 @@ def test_every_refusal_says_what_to_write_instead() -> None:
         reason = refuse(pattern)
         assert reason is not None
         assert any(remedy in reason for remedy in remedies), reason
+
+
+def test_the_expansion_cap_is_where_it_is_for_a_measured_reason() -> None:
+    """Six zero-widening wildcards are accepted; seven is refused.
+
+    The host arm emits a present and an absent form per leading or interior
+    ``**``, so *k* of them cost 2^*k* patterns — measured at 1,024 patterns and
+    35 ms for *k* = 10, and 65,536 and 3.2 s of regex compilation for *k* = 16,
+    paid once by discovery and twice by the attribution diff. The failure mode
+    is a build that hangs rather than one that warns, so the cap is not
+    decoration.
+
+    The boundary is asserted from both sides, because a cap nothing fences is a
+    cap the next refactor deletes silently — which is exactly what happened
+    here: this test was described in a receipt and never committed, and
+    validation measured that setting the constant to ``10**6`` left the whole
+    suite green.
+    """
+    at_the_cap = "**/" * MAX_ZERO_WIDENING + "x.rst"
+    assert refuse(at_the_cap) is None
+    assert refuse("**/" * (MAX_ZERO_WIDENING + 1) + "x.rst") is not None
+
+    # The doubling is only visible when the wildcards are separated by literal
+    # segments; adjacent ones collapse to the same string and are deduplicated,
+    # which is why the cap counts WILDCARDS rather than emitted patterns.
+    assert len(to_exclude_patterns("a/**/b/**/c/**/d.rst")) == 2**3
+    assert len(to_exclude_patterns(at_the_cap)) == MAX_ZERO_WIDENING + 1
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +217,12 @@ PARITY_PATTERNS = (
     "internal.rst",
     "*.rst",
     "a[bX]c.rst",
+    # A wildcard inside a character class is a LITERAL character in all three
+    # engines. The refusal side of that is fenced end to end; these rows are
+    # what make "all three agree" a measurement rather than an assertion.
+    "docs/[?]x.rst",
+    "docs/[a]/g.rst",
+    "[i]nternal.rst",
     "a?c.rst",
     "docs/index.rst",
     "docs/**",
