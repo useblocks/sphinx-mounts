@@ -803,16 +803,29 @@ where an over-broad rule is visible.
 
 ### 12.7 Anchoring, and the supported layouts
 
-Rule globs are anchored at the project's source root: the roots named by
-`[source] dir`, or the TOML file's own directory when that key is absent, each
-resolved as §3 resolves a mount path.
+Rule globs are anchored at **one** source root, resolved as §3 resolves a mount
+path. The precedence is the sibling reader's:
+
+1. `[source] dir` — a **string**, never an array. It names one path, and the
+   canonical reader declares it as one and fails to deserialize anything else,
+   so accepting an array here would let a file build in one reader and be
+   unreadable to the other. An empty string means unset.
+2. the deprecated `[project] srcdir`, when `dir` is unset — it still stands as
+   the source root there, so a reader that ignores it anchors rule globs
+   somewhere the other reader does not.
+3. otherwise, the directory containing the TOML file.
 
 The host arm of the fold expresses a rule as an `exclude_patterns` entry, which
-Sphinx anchors at `srcdir`. So the layout must be an identity: after removing
-any root that is also a mount root (those are reached through the mount's own
-walk instead), the remaining source root must be `srcdir`. Anything else is
-`mounts.variant_layout`, naming both directories and the fix — usually
-`[source] dir = ["<srcdir relative to the TOML>"]`.
+Sphinx anchors at `srcdir`. So the layout must be an identity: the source root
+must BE `srcdir` — unless it is also a mount root, which is reached through the
+mount's own walk instead. Anything else is `mounts.variant_layout`, naming both
+directories and both remedies: move the TOML beside the source directory, or
+declare `[source] dir = "<srcdir relative to the TOML>"`.
+
+The message must also say that `[source] dir` is the sibling reader's
+**discovery** root, because the obvious fix for a TOML at a repository root is
+`dir = "."` — which satisfies the Sphinx-side check by making the other tool
+index the whole repository.
 
 Refusing rather than prefix-shifting is deliberate: a shifted rewrite has no
 correct form for a basename-matching rule, and gating only the root that

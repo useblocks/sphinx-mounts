@@ -1345,19 +1345,32 @@ supports the layouts where those two coincide, which is the default:
 ``confdir``.
 
 When they differ — ``conf.py`` in ``docs/`` and the sources in
-``docs/source/``, say — declare the Sphinx source directory as the source
-root:
+``docs/source/``, say — either move ``ubproject.toml`` beside the source
+directory, or declare that directory as the source root in the file you
+already have:
 
 .. code-block:: toml
 
    # docs/ubproject.toml
    [source]
-   dir = ["source"]
+   dir = "source"
 
-Without that, the configuration is refused with a message naming both
-directories. Silently gating only the root that happens to coincide is the
-failure the whole key exists to prevent. Roots that are a **mount** root
-are not a layout problem: those are reached through the mount's own walk.
+.. warning::
+
+   ``dir`` is a **string**, not an array: it names one source root, and the
+   sibling tools reading this file reject any other shape. And it is *their*
+   **discovery root** as well, so choose a value that is right for them too —
+   widening it to the repository root to satisfy a Sphinx-side check would
+   make them index the whole repository.
+
+   The deprecated ``[project] srcdir`` is honoured as the anchor when
+   ``[source] dir`` is unset, with the same precedence the sibling tools use.
+
+Without one of those, the configuration is refused with a message naming both
+directories and both remedies. Silently gating a root that happens to coincide
+is the failure the whole key exists to prevent. A source root that is also a
+**mount** root is not a layout problem: that one is reached through the
+mount's own walk.
 
 A rule that would remove the root document
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

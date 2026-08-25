@@ -331,8 +331,13 @@ def _value_kind(node: ast.AST) -> str:
     """
     if isinstance(node, ast.UnaryOp):
         operand = node.operand
-        return "int" if isinstance(operand.value, int) else "float"  # type: ignore[attr-defined]
-    value = node.value  # type: ignore[attr-defined]
+        if isinstance(operand, ast.Constant) and isinstance(operand.value, int):
+            return "int"
+        return "float"
+    if not isinstance(node, ast.Constant):  # pragma: no cover - validated
+        msg = f"cannot evaluate `{type(node).__name__}` as a literal"
+        raise VariantEvalError(msg)
+    value = node.value
     if isinstance(value, str):
         return "str"
     if value is None:
@@ -348,8 +353,14 @@ def _literal_value(node: ast.AST) -> Any:
     """The value of a node :func:`_literal_kind` accepted."""
     if isinstance(node, ast.UnaryOp):
         operand = node.operand
-        return -operand.value  # type: ignore[attr-defined,operator]
-    return node.value  # type: ignore[attr-defined]
+        if isinstance(operand, ast.Constant) and isinstance(operand.value, int | float):
+            # `validate` only admits a negated NUMBER, so this is the only
+            # shape that reaches here.
+            return -operand.value
+    if isinstance(node, ast.Constant):
+        return node.value
+    msg = f"cannot read a literal from `{type(node).__name__}`"  # pragma: no cover
+    raise VariantEvalError(msg)  # pragma: no cover
 
 
 def _scalar_list(text: str, node: ast.AST) -> list[ast.AST] | None:
@@ -415,14 +426,15 @@ def _validate_predicate_call(text: str, node: ast.Call) -> None:
     func = node.func
     if not isinstance(func, ast.Attribute):  # pragma: no cover - caller checks
         _refuse_operand(node, what="expression")
-    if _receiver(func.value) is None:  # type: ignore[union-attr]
+        return
+    if _receiver(func.value) is None:
         msg = "a string predicate may only be called on a `var.*` field"
         raise VariantConditionError(msg)
     if node.keywords:
         msg = "keyword arguments are not supported"
         raise VariantConditionError(msg)
     if len(node.args) != 1 or _literal_kind(text, node.args[0]) != "str":
-        msg = f"`.{func.attr}()` takes exactly one string literal"  # type: ignore[union-attr]
+        msg = f"`.{func.attr}()` takes exactly one string literal"
         raise VariantConditionError(msg)
 
 
@@ -842,6 +854,12 @@ def _transform(node: ast.AST, value: tuple[str, Any], name: str) -> tuple[str, A
     return ("str", payload.upper() if node.func.attr == "upper" else payload.lower())
 
 
+def _receiver_name(node: ast.AST) -> str:
+    """The dotted spelling of a receiver's ``var.*`` chain, for a message."""
+    chain = _receiver(node)
+    return _dotted(chain) if chain is not None else "?"
+
+
 def _receiver_value(node: ast.AST, data: dict[str, Any]) -> tuple[str, Any]:
     """Resolve and lower a receiver, applying any transformer suffix."""
     chain = _receiver(node)
@@ -866,7 +884,7 @@ def _evaluate_compare(node: ast.Compare, data: dict[str, Any]) -> bool:
         if _receiver(right) is not None:
             container = _receiver_value(right, data)
             literal = (_value_kind(left), _literal_value(left))
-            result = _literal_in_field(container, literal, _dotted(_receiver(right)))
+            result = _literal_in_field(container, literal, _receiver_name(right))
         else:
             value = _receiver_value(left, data)
             elements = right.elts if isinstance(right, ast.List | ast.Tuple) else []
@@ -880,12 +898,12 @@ def _evaluate_compare(node: ast.Compare, data: dict[str, Any]) -> bool:
     receiver_node = left if left_is_receiver else right
     other_node = right if left_is_receiver else left
     value = _receiver_value(receiver_node, data)
-    name = _dotted(_receiver(receiver_node))
+    name = _receiver_name(receiver_node)
 
     if isinstance(op, _EQ_OPS):
         if _receiver(other_node) is not None:
             other = _as_literal(
-                _receiver_value(other_node, data), _dotted(_receiver(other_node))
+                _receiver_value(other_node, data), _receiver_name(other_node)
             )
         else:
             other = (_value_kind(other_node), _literal_value(other_node))
@@ -902,7 +920,7 @@ def _evaluate_compare(node: ast.Compare, data: dict[str, Any]) -> bool:
         if other_value[0] not in _NUMBER_KINDS:
             msg = (
                 f"unsupported type for number comparison; "
-                f"`{_dotted(_receiver(other_node))}` is a {other_value[0]}"
+                f"`{_receiver_name(other_node)}` is a {other_value[0]}"
             )
             raise VariantEvalError(msg)
         other_number = float(other_value[1])
@@ -923,14 +941,17 @@ _FLIPPED: dict[type[ast.cmpop], type[ast.cmpop]] = {
 def _evaluate_predicate(node: ast.Call, data: dict[str, Any]) -> bool:
     """Evaluate a terminal ``.startswith(…)`` / ``.endswith(…)``."""
     func = node.func
-    receiver = func.value  # type: ignore[union-attr]
+    if not isinstance(func, ast.Attribute):  # pragma: no cover - validated
+        msg = "a string predicate may only be called on a `var.*` field"
+        raise VariantEvalError(msg)
+    receiver = func.value
     value = _receiver_value(receiver, data)
-    name = _dotted(_receiver(receiver))
+    name = _receiver_name(receiver)
     if value[0] != "str":
         msg = f"unsupported type for a string predicate; `{name}` is a {value[0]}"
         raise VariantEvalError(msg)
     literal = _literal_value(node.args[0])
-    if func.attr == "startswith":  # type: ignore[union-attr]
+    if func.attr == "startswith":
         return value[1].startswith(literal)
     return value[1].endswith(literal)
 

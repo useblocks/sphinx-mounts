@@ -874,9 +874,8 @@ class VariantSourcesConfig:
 
     Fields:
         toml_path: The file these values came from.
-        source_dirs: Resolved ``[source] dir`` roots, or the TOML's own
-            directory when the key is absent. The layout guard compares these
-            against Sphinx's ``srcdir``.
+        source_root: The resolved root a rule glob is anchored at. The layout
+            guard compares it against Sphinx's ``srcdir``.
         rules: The declared rules, in array order.
         declared: Whether the ``variant_sources`` key was present at all. An
             empty array is a declaration ("this project has no rules") and is
@@ -888,7 +887,7 @@ class VariantSourcesConfig:
     """
 
     toml_path: Path
-    source_dirs: tuple[Path, ...]
+    source_root: Path
     rules: tuple[VariantRule, ...]
     declared: bool
     variant_data: dict[str, Any] | None
@@ -901,7 +900,7 @@ def load_variant_sources_from_toml(toml_path: Path) -> VariantSourcesConfig | No
     .. code-block:: toml
 
        [source]
-       dir = ["source"]                 # optional; the rules' anchor
+       dir = "source"                   # optional; the rules' anchor
 
        [[source.variant_sources]]
        if = "var.edition == 'pro'"
@@ -934,6 +933,8 @@ def load_variant_sources_from_toml(toml_path: Path) -> VariantSourcesConfig | No
 
     source = data.get("source")
     source = source if isinstance(source, Mapping) else {}
+    project = data.get("project")
+    project = project if isinstance(project, Mapping) else {}
     needs = data.get("needs")
     needs = needs if isinstance(needs, Mapping) else {}
 
@@ -943,7 +944,7 @@ def load_variant_sources_from_toml(toml_path: Path) -> VariantSourcesConfig | No
 
     return VariantSourcesConfig(
         toml_path=toml_path,
-        source_dirs=_extract_source_dirs(source.get("dir"), toml_path),
+        source_root=_extract_source_root(source, project, toml_path),
         rules=rules,
         declared=declared,
         variant_data=_extract_variant_data(needs.get("variant_data"), toml_path),
@@ -953,32 +954,52 @@ def load_variant_sources_from_toml(toml_path: Path) -> VariantSourcesConfig | No
     )
 
 
-def _extract_source_dirs(raw: Any, toml_path: Path) -> tuple[Path, ...]:
-    """Resolve ``[source] dir`` into absolute roots.
+def _extract_source_root(
+    source: Mapping[str, Any], project: Mapping[str, Any], toml_path: Path
+) -> Path:
+    """Resolve the single root a rule glob is anchored at.
+
+    ubCode's precedence, reproduced: ``[source] dir`` wins; the deprecated
+    ``[project] srcdir`` stands when ``dir`` is unset; otherwise the root is
+    the TOML file's own directory. Reading only the first of those was a
+    fail-open hole — a project on the legacy key anchored its rules at the TOML
+    directory here and at ``<toml dir>/<srcdir>`` in ubCode, and the layout
+    guard passed on the wrong root with nothing said.
+
+    **``dir`` is a STRING, not an array.** ubCode declares it as one
+    (``Field<PathBuf>``, ``"type": "string"`` in its published schema), so an
+    array is a hard deserialization failure there. Accepting one here would be
+    a divergence of its own, and — worse — the layout refusal used to *advise*
+    the array form, which would have left the project unreadable by the other
+    tool. Both are fixed together.
+
+    An empty string means unset, matching ubCode's documented ``""`` ≡ unset
+    sentinel.
 
     Anchored at the TOML's own directory and then resolved, exactly as a
     mount's ``dir`` is (``mapping-contract.md`` §3), so the two cannot drift.
-    An absent key means the TOML's directory is the single root, which is what
-    makes the default layout — ``ubproject.toml`` beside ``conf.py``, with
-    ``srcdir == confdir`` — the identity case the host arm needs.
     """
-    if raw is None:
-        return (toml_path.parent.resolve(),)
-    entries = [raw] if isinstance(raw, str) else raw
-    if not isinstance(entries, list) or not all(
-        isinstance(entry, str) for entry in entries
-    ):
+    raw = source.get("dir")
+    key = "[source] dir"
+    if raw is None or raw == "":
+        raw = project.get("srcdir")
+        key = "[project] srcdir"
+    if raw is None or raw == "":
+        return toml_path.parent.resolve()
+    if not isinstance(raw, str):
+        shape = "an array" if isinstance(raw, list) else type(raw).__name__
         msg = (
-            f"sphinx-mounts: `[source] dir` in {toml_path} must be a string or "
-            f"an array of strings; got {type(raw).__name__}."
+            f"sphinx-mounts: `{key}` in {toml_path} must be a string; got "
+            f"{shape}. It names ONE source root — sibling tools that read this "
+            f"same file declare it as a string and reject any other shape, so "
+            f'a project writing `dir = ["source"]` becomes unreadable to them. '
+            f'Write `dir = "source"`.'
         )
         raise TomlConfigError(msg)
-    return tuple(
-        (toml_path.parent / entry).resolve()
-        if not Path(entry).is_absolute()
-        else Path(entry).resolve()
-        for entry in entries
-    )
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (toml_path.parent / candidate).resolve()
 
 
 def _extract_variant_rules(raw: Any, toml_path: Path) -> tuple[VariantRule, ...]:

@@ -727,7 +727,7 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
     base_exclude = tuple(config.exclude_patterns)
     appended = [pattern for _, patterns in host_patterns for pattern in patterns]
     config.exclude_patterns = [*config.exclude_patterns, *appended]
-    gated = _fold_into_mounts(config, excluding)
+    gated = _fold_into_mounts(app, config, excluding)
 
     setattr(
         app,
@@ -808,40 +808,42 @@ def _guard_layout(
     """Require the rules' anchor to be Sphinx's ``srcdir``.
 
     A rule glob is anchored at the project's source root; an
-    ``exclude_patterns`` entry is anchored at ``srcdir``. When the two
-    coincide the mapping is the identity and a rule means one thing. When they
-    do not, a prefix-shifted rewrite is *mechanically* possible for a
-    path-naming pattern and has no correct form at all for a basename-matching
-    one — and silently gating only the root that happens to coincide is the
-    failure this whole feature exists to prevent. So it is refused, naming both
-    directories and the fix.
+    ``exclude_patterns`` entry is anchored at ``srcdir``. When the two coincide
+    the mapping is the identity and a rule means one thing. When they do not, a
+    prefix-shifted rewrite is *mechanically* possible for a path-naming pattern
+    and has no correct form at all for a basename-matching one — and silently
+    gating a root that happens to coincide is the failure this whole feature
+    exists to prevent. So it is refused, naming both directories and both fixes.
 
-    Roots that are a **mount** root are not a layout problem: those are the
-    mount arm's business, and it reaches them by handing the mount's own walker
-    the translated pattern.
+    A source root that is also a **mount** root is not a layout problem: that
+    is the mount arm's business, and it reaches it by handing the mount's own
+    walker the translated pattern.
 
     Variant-independent, so it runs before any condition is evaluated: a layout
     no pattern can be anchored in is wrong in every variant.
     """
     srcdir = Path(app.srcdir).resolve()
-    mount_dirs = _raw_mount_dirs(config)
-    host_roots = [root for root in spec.source_dirs if root not in mount_dirs]
-    if host_roots == [srcdir]:
+    if spec.source_root == srcdir:
         return
-    listed = ", ".join(str(root) for root in spec.source_dirs) or "(none)"
+    if spec.source_root in _raw_mount_dirs(app, config):
+        return
     named = "\n".join(f"  {rule.label}" for rule in rules)
     relative = _relative_hint(srcdir, spec.toml_path.parent)
     msg = (
         f"sphinx-mounts: `{spec.toml_path}` declares "
-        f"`[[source.variant_sources]]`, but the source root(s) its globs are "
-        f"anchored at ({listed}) are not Sphinx's source directory "
+        f"`[[source.variant_sources]]`, but the source root its globs are "
+        f"anchored at ({spec.source_root}) is not Sphinx's source directory "
         f"({srcdir}), so no rule glob can be expressed as an "
         f"`exclude_patterns` entry:\n{named}\n"
-        f"Declare the Sphinx source directory as the source root — "
-        f"`[source] dir = [{relative!r}]` in that file — or move the file "
-        f"beside it. Gating only the root that happens to coincide would "
-        f"publish files a rule excludes, which is the failure this key exists "
-        f"to prevent. [mounts.variant_layout]"
+        f"Two ways out. Either move `ubproject.toml` beside the source "
+        f"directory, or declare that directory as the source root in the file "
+        f"you already have — `[source] dir = {relative!r}` (a string, not an "
+        f"array). Note that `[source] dir` is also the DISCOVERY root for the "
+        f"sibling tools reading this file, so choose a value that is right for "
+        f"them too: widening it to the repository root would make them index "
+        f"the whole repository. Gating only a root that happens to coincide "
+        f"would publish files a rule excludes, which is the failure this key "
+        f"exists to prevent. [mounts.variant_layout]"
     )
     raise VariantRuleError(msg)
 
@@ -854,8 +856,18 @@ def _relative_hint(srcdir: Path, toml_dir: Path) -> str:
         return srcdir.as_posix()
 
 
-def _raw_mount_dirs(config: Config) -> set[Path]:
-    """Resolved ``dir`` of every mount currently configured."""
+def _raw_mount_dirs(app: Sphinx, config: Config) -> set[Path]:
+    """Resolved ``dir`` of every mount currently configured.
+
+    Anchored at ``confdir``, exactly as ``parse_mounts`` will at priority 500.
+    A TOML-declared ``dir`` is already absolute by the time it gets here (the
+    loader anchors it at the TOML's directory at 400), so only a
+    ``conf.py``-declared relative path reaches the join — and resolving that
+    one against the process's working directory instead was a live defect: it
+    made the mount's attribution silently vanish while the fold still gated its
+    files, so every variant build of such a project failed under ``-W``.
+    """
+    confdir = Path(app.confdir)
     dirs: set[Path] = set()
     for entry in getattr(config, "mounts", None) or ():
         raw = (
@@ -864,8 +876,16 @@ def _raw_mount_dirs(config: Config) -> set[Path]:
             else getattr(entry, "dir", None)
         )
         if raw:
-            dirs.add(Path(raw).resolve())
+            dirs.add(_anchor_at_confdir(raw, confdir))
     return dirs
+
+
+def _anchor_at_confdir(raw: Any, confdir: Path) -> Path:
+    """Absolutise a mount ``dir`` the way ``parse_mounts`` will at 500."""
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (confdir / candidate).resolve()
 
 
 def _resolve_variant_map(
@@ -1067,7 +1087,7 @@ def _source_suffixes(config: Config) -> tuple[str, ...]:
 
 
 def _fold_into_mounts(
-    config: Config, excluding: tuple[VariantRule, ...]
+    app: Sphinx, config: Config, excluding: tuple[VariantRule, ...]
 ) -> tuple[_GatedMount, ...]:
     """Fold the FALSE rules into the mount tables, then reassign the value.
 
@@ -1096,13 +1116,18 @@ def _fold_into_mounts(
     raw = getattr(config, "mounts", None)
     if not raw:
         return ()
+    confdir = Path(app.confdir)
     gated: list[_GatedMount] = []
     folded: list[Any] = []
     for index, entry in enumerate(raw):
         if isinstance(entry, Mapping):
-            new_entry, record = _fold_into_mount_entry(dict(entry), index, excluding)
+            new_entry, record = _fold_into_mount_entry(
+                dict(entry), index, excluding, confdir
+            )
         elif isinstance(entry, MountConfig):
-            new_entry, record = _fold_into_mount_config(entry, index, excluding)
+            new_entry, record = _fold_into_mount_config(
+                entry, index, excluding, confdir
+            )
         else:
             new_entry, record = entry, None
         folded.append(new_entry)
@@ -1113,7 +1138,10 @@ def _fold_into_mounts(
 
 
 def _fold_into_mount_entry(
-    entry: dict[str, Any], index: int, excluding: tuple[VariantRule, ...]
+    entry: dict[str, Any],
+    index: int,
+    excluding: tuple[VariantRule, ...],
+    confdir: Path,
 ) -> tuple[dict[str, Any], _GatedMount | None]:
     """Fold into one raw TOML mount table."""
     mount_at = entry.get("mount_at")
@@ -1129,7 +1157,11 @@ def _fold_into_mount_entry(
         return entry, _GatedMount(
             index=index,
             mount_at=mount_at,
-            dir=Path(entry["dir"]) if isinstance(entry["dir"], str) else None,
+            dir=(
+                _anchor_at_confdir(entry["dir"], confdir)
+                if isinstance(entry["dir"], str)
+                else None
+            ),
             include=tuple(entry.get("include") or ()),
             gitignore=bool(entry.get("gitignore", True)),
             excludes_before=before,
@@ -1140,7 +1172,10 @@ def _fold_into_mount_entry(
 
 
 def _fold_into_mount_config(
-    mount: MountConfig, index: int, excluding: tuple[VariantRule, ...]
+    mount: MountConfig,
+    index: int,
+    excluding: tuple[VariantRule, ...],
+    confdir: Path,
 ) -> tuple[MountConfig, _GatedMount | None]:
     """Fold into a ``conf.py``-declared :class:`MountConfig`.
 
@@ -1159,7 +1194,7 @@ def _fold_into_mount_config(
         return updated, _GatedMount(
             index=index,
             mount_at=mount.mount_at,
-            dir=mount.dir,
+            dir=_anchor_at_confdir(mount.dir, confdir),
             include=mount.include,
             gitignore=mount.gitignore,
             excludes_before=mount.exclude,

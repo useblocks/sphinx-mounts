@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import shutil
 import textwrap
@@ -828,7 +829,8 @@ def test_a_non_identity_layout_is_refused(tmp_path):
         _build_split(confdir, confdir / "source", tmp_path / "build")
     message = str(excinfo.value)
     assert "source directory" in message
-    assert "[source] dir = ['source']" in message
+    assert "[source] dir = 'source'" in message, "the STRING form ubCode accepts"
+    assert "DISCOVERY root" in message, "and the warning about widening it"
 
 
 def test_a_declared_source_dir_makes_a_split_layout_identity(tmp_path):
@@ -836,6 +838,32 @@ def test_a_declared_source_dir_makes_a_split_layout_identity(tmp_path):
 
     ``[source] dir`` is the same key ubCode reads for the same purpose, so a
     project that declares it is describing its layout once for both tools.
+    """
+    toml = """
+    [source]
+    dir = "source"
+
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml, srcdir_name="source")
+    app = _build_split(confdir, confdir / "source", tmp_path / "build")
+    assert "hostgated.html" not in _pages(app)
+    assert "hostkeep.html" in _pages(app)
+
+
+def test_an_array_source_dir_is_refused_by_name(make_app, tmp_path):
+    """``[source] dir`` is a STRING, and accepting an array is a divergence.
+
+    Sibling readers of this same file declare the key as one path and reject
+    any other shape, so a project that wrote the array form would build here
+    and be unreadable to them. This refusal used to be worse than absent: the
+    layout message *advised* the array form, which is a remedy that breaks the
+    other reader of the shared file.
     """
     toml = """
     [source]
@@ -849,9 +877,100 @@ def test_a_declared_source_dir_makes_a_split_layout_identity(tmp_path):
     edition = "basic"
     """
     confdir, _ = make_project(tmp_path, toml=toml, srcdir_name="source")
+    with pytest.raises(Exception, match="must be a string"):
+        _build_split(confdir, confdir / "source", tmp_path / "build")
+
+
+def test_the_legacy_project_srcdir_is_read_as_the_anchor(tmp_path):
+    """``[project] srcdir`` still anchors rule globs when ``[source] dir`` is unset.
+
+    Reading only ``[source] dir`` was a fail-OPEN hole: a project on the legacy
+    key anchored its rules at the TOML's directory here and at
+    ``<toml dir>/<srcdir>`` in the sibling reader, and the layout guard — whose
+    entire job is to make that impossible — passed on the wrong root with
+    nothing said.
+    """
+    toml = """
+    [project]
+    srcdir = "source"
+
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml, srcdir_name="source")
     app = _build_split(confdir, confdir / "source", tmp_path / "build")
     assert "hostgated.html" not in _pages(app)
     assert "hostkeep.html" in _pages(app)
+
+
+def test_a_source_dir_wins_over_the_legacy_srcdir(tmp_path):
+    """The precedence the sibling reader uses: ``dir`` first, then ``srcdir``."""
+    toml = """
+    [project]
+    srcdir = "elsewhere"
+
+    [source]
+    dir = "source"
+
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml, srcdir_name="source")
+    app = _build_split(confdir, confdir / "source", tmp_path / "build")
+    assert "hostgated.html" not in _pages(app)
+
+
+def test_a_conf_py_mount_with_a_relative_dir_is_attributed(
+    make_app, tmp_path, monkeypatch
+):
+    """A relative ``conf.py`` mount dir gated but was never attributed.
+
+    TOML mount paths are absolutised at priority 400, before the fold;
+    ``conf.py`` ones are absolutised at 500, *after* it. The fold recorded the
+    relative path as written, so the attribution walk resolved it against the
+    process's working directory, found nothing, and dropped the whole mount's
+    attribution — while the fold still gated its files. The result was the
+    worst combination available: the pages gone AND the warnings not
+    downgraded, so every variant build of such a project failed under ``-W``.
+
+    The working directory is moved away from ``confdir`` on purpose: that is
+    what separates "resolved against confdir" from "happened to work".
+    """
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["binternal.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, bundle = make_project(tmp_path, toml=toml)
+    relative = os.path.relpath(bundle, confdir)
+    conf = confdir / "conf.py"
+    conf.write_text(
+        conf.read_text(encoding="utf-8")
+        + f"\nmounts = [{{'dir': r'{relative}', 'mount_at': 'mnt',"
+        + " 'attach_to': 'index'}]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    app = _build(make_app, confdir)
+    assert "mnt/index.html" in _pages(app)
+    assert "mnt/binternal.html" not in _pages(app)
+    # The toctree references must be DOWNGRADED, not merely emitted. Asserting
+    # on the toctree warnings rather than on a globally clean `-W` keeps the
+    # test independent of unrelated cross-application noise in a shared
+    # process; the `-W` legs elsewhere in this module cover the global posture.
+    assert "toctree contains reference" not in app._warning.getvalue()
+    assert mount_warnings.VARIANT_EXCLUDED_CODE in app._status.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -1047,7 +1166,7 @@ def test_a_toml_declared_data_file_anchors_at_the_toml_directory(make_app, tmp_p
     variant_data_file = "variants.json"
 
     [source]
-    dir = [".."]
+    dir = ".."
     """
     confdir, _ = make_project(tmp_path, toml=toml)
     # Move the TOML into a sub-directory, with its data file beside it. A
