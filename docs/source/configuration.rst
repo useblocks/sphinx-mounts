@@ -1252,7 +1252,7 @@ open is the one outcome that must not be possible.
 The condition
 ~~~~~~~~~~~~~
 
-``if`` holds a Python-like expression over the variant map. It supports
+``if`` holds a Python-*like* expression over the variant map. It supports
 comparisons (``== != < <= > >=``), membership (``in`` / ``not in``, with a
 list literal on the right), ``is None`` / ``is not None``,
 ``.startswith(…)`` / ``.endswith(…)``, ``and`` / ``or`` / ``not`` with
@@ -1262,6 +1262,44 @@ Nothing is executed to evaluate it: the expression is parsed, checked
 against that grammar, and then **interpreted** over the variant map. There
 is no namespace object, no builtins, and no ``eval`` anywhere in the
 extension.
+
+.. important::
+
+   **The grammar and its semantics are those of the other reader, not
+   Python's.** The same ``if`` string decides which files two tools build, so
+   where the two could disagree this one follows the other rather than
+   CPython. The differences are small in number and consequential in effect:
+
+   ``var.debug == 0`` is **false** when ``debug = false``, where Python says
+   true — and ``var.debug != 0`` is **true**, where Python says false. A value
+   is only ever compared with a value of the same kind: an integer against an
+   integer or a float, a string against a string, a boolean against a boolean.
+   Any other pairing is simply *false* rather than coerced.
+
+   A few forms are **evaluation errors** rather than values, and an evaluation
+   error excludes the rule's files: an ordering comparison against anything
+   that is not a number (``var.debug > 0``), a list on either side of ``==``
+   (``var.tags == var.build.features``), a wrongly-typed literal in a
+   membership test (``2 in var.tags``), and ``'key' in var.some_table``.
+
+   Spelling matters too, and this is the part most likely to catch you:
+   ``not(x)``, ``x and(y)``, ``in['pro']``, ``var . name``, ``.upper( )``,
+   ``.startswith( 'x' )``, a **trailing comma** in a list (``['pro',]``), a
+   tuple (``('pro','x')``), and numerals written as ``0x2`` / ``0b10`` / ``2_0``
+   / ``.5`` are all configuration errors — the other reader's grammar has no
+   token for them, and accepting them here would mean one rule string and two
+   document sets. Whitespace *is* free where that grammar allows it:
+   ``var.count>=2``, ``[ 'a' , 'b' ]``, extra spaces and tabs are all fine.
+
+   String escapes are read that reader's way: ``\n``, ``\t``, ``\r``, ``\b``,
+   ``\f``, ``\v``, ``\a``, ``\0``, ``\\``, ``\'`` and ``\"`` are decoded and
+   everything else keeps its backslash, so ``'a\x41b'`` is six characters
+   rather than four.
+
+   The full tables are in `design/mapping-contract.md
+   <https://github.com/useblocks/sphinx-mounts/blob/main/design/mapping-contract.md>`__
+   §12.5. If the two engines ever move to Python's semantics, they move
+   together.
 
 Two narrowings, both configuration errors:
 
@@ -1296,10 +1334,16 @@ purpose is keeping content out.
 
    ``tests/fixtures/variant_condition_conformance.toml`` in the repository
    is a vendored copy of ubCode's conformance corpus: 46 conditions with
-   their verdicts and truth values. The test suite runs every row. If you
-   are implementing a third reader, that file — not this page — is the
-   specification, and a prose summary of a grammar is exactly the thing
-   that turns out to be imprecise in the corner that matters.
+   their verdicts and truth values, and the test suite runs every row. It is
+   the shared **test-vector set**.
+
+   It is not the whole grammar, and a reader implementing only it lands on
+   Python's semantics — which are not these. The **contract** is
+   ``design/mapping-contract.md`` §12.5: the accept-set, the lexical rules and
+   the comparison semantics as tables, each mirrored on the other reader's
+   shipped engine. A prose summary of a grammar is exactly the thing that turns
+   out to be imprecise in the corner that matters, which is why both live as
+   tables and as a 209-row parity suite.
 
 Toctrees, and the ``-W`` posture
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

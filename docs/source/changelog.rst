@@ -23,10 +23,16 @@ Unreleased
   false excludes its ``files``; a file no false rule matches is unaffected.
   Rules only ever narrow, and their order does not matter.
 
-  Both arms are gated: host files leave through ``exclude_patterns``, and
-  mounted files leave through the mount's own walk, so a rule reaches a bundle
-  without knowing where it is mounted. A gating flip converges on the build
-  where it happened, in both directions, without ``sphinx-build -E``.
+  Host files leave through ``exclude_patterns``, and files in a **directory**
+  mount leave through that mount's own walk, so a rule reaches a bundle without
+  knowing where it is mounted. A gating flip converges on the build where it
+  happened, in both directions, without ``sphinx-build -E``.
+
+  **A file-list mount** — one declared with ``files = [...]`` rather than
+  ``dir`` — is **not gated at all**, under any rule spelling, and neither is
+  ubCode's: a file-list mount's entries are an explicit request for named files
+  and bypass pattern matching entirely. Use a directory mount for a bundle that
+  has to be gateable.
 
   **A project with no mounts at all can install sphinx-mounts purely for
   this**, to have ``sphinx-build`` narrow its document set per variant exactly
@@ -42,15 +48,32 @@ Unreleased
   cannot disagree about which documents exist.
 
   ``if`` conditions are **interpreted, never evaluated**: there is no ``eval``,
-  no ``exec`` and no namespace object anywhere in the extension. The grammar
-  is pinned by a vendored copy of ubCode's 46-row conformance corpus, which
-  the test suite runs in full.
+  no ``exec`` and no namespace object anywhere in the extension.
 
-  Four spellings refuse the whole configuration rather than skipping their
-  rule — ``{a,b}`` alternation, a ``..`` climb, an absolute path, and ``?``
-  beside a path separator — because skipping a rule leaves every file it names
-  in the build, including the files its valid patterns name. A rule that is
-  false for this variant and would remove ``root_doc`` is refused too, so
+  **The condition grammar and its semantics are ubCode's, not Python's**, and
+  deliberately so — the same string decides which files two tools build, so
+  matching CPython where the two disagree would mean one rule string and two
+  document sets. ``var.debug == 0`` is **false** when ``debug = false`` (Python
+  says true), its twin ``var.debug != 0`` is **true**, a handful of forms are
+  evaluation errors rather than values (``var.debug > 0``,
+  ``var.tags == var.build.features``, ``2 in var.tags``, ``'k' in var.table``),
+  and spellings ubCode's lexer has no token for are configuration errors here
+  too — ``not(x)``, ``x and(y)``, ``in['a']``, ``var . name``, ``.upper( )``,
+  a trailing comma in a list, a tuple, and ``0x2`` / ``0b10`` / ``2_0`` / ``.5``.
+  Whitespace stays free where that grammar allows it (``var.count>=2``,
+  ``[ 'a' , 'b' ]``). Both tables are published in
+  ``design/mapping-contract.md`` §12.5 and pinned by a 209-row parity suite,
+  alongside the vendored 46-row conformance corpus the test suite still runs in
+  full.
+
+  Six categories of glob spelling refuse the whole configuration rather than
+  skipping their rule — an **empty** pattern, one ending in a **path
+  separator**, ``{a,b}`` alternation, a ``..`` climb, an absolute path, and
+  ``?`` beside a separator — plus a cap on how many ``**`` components one
+  pattern may carry. Skipping a rule leaves every file it names in the build,
+  including the files its valid patterns name; an empty pattern selected
+  *nothing* on one arm and an entire mounted bundle on the other. A rule that
+  is false for this variant and would remove ``root_doc`` is refused too, so
   Sphinx's own "unable to load the master document" abort — which blames the
   source directory for an exclusion — is not reachable through a rule that
   names a host document, whatever suffix it carries. (A root document provided

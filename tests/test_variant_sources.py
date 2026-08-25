@@ -30,6 +30,7 @@ from pathlib import Path
 import shutil
 import textwrap
 from typing import Any
+import unicodedata
 
 import pytest
 from sphinx.application import Sphinx
@@ -719,6 +720,60 @@ def test_a_warning_about_an_asset_path_is_never_downgraded(make_app, tmp_path):
         assert _fails_under_dash_w(make_app, confdir, tmp_path / edition / "b2"), (
             f"edition={edition}: and it must still fail -W"
         )
+
+
+def test_a_non_ascii_docname_is_attributed(make_app, tmp_path):
+    """The attribution set and ``found_docs`` must agree on Unicode form.
+
+    ``Project.path2doc`` runs its path through ``path_stabilize``, which
+    NFC-normalises — and on macOS ``os.scandir`` yields **NFD** names, so a
+    reader slicing a raw path would key the attribution set in NFD while
+    ``found_docs`` holds NFC, and the downgrade would miss.
+
+    Measured on Sphinx 7.4.7 and 9.1.0: ``get_matching_files`` already
+    NFC-normalises every entry it yields, so the host arm's derivation receives
+    NFC and cannot drift. (The mount arm derives docnames from the walker's raw
+    path on both sides — the attribution and ``mounter.py`` — so those agree
+    with each other too.) This test is the fence for that, since it is a
+    property of Sphinx that could change under us rather than one this
+    extension controls.
+    """
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["café.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml)
+    # Written in NFD — the form macOS stores and returns.
+    name = unicodedata.normalize("NFD", "café.rst")
+    _write(
+        confdir / name,
+        """
+        Cafe
+        ====
+    """,
+    )
+    index = confdir / "index.rst"
+    index.write_text(
+        index.read_text(encoding="utf-8").replace(
+            "   hostkeep",
+            "   " + unicodedata.normalize("NFC", "café") + "\n   hostkeep",
+        ),
+        encoding="utf-8",
+    )
+    app = _build(make_app, confdir)
+    nfc = unicodedata.normalize("NFC", "café")
+    assert nfc + ".html" not in _pages(app)
+    # The toctree reference to it is downgraded, not left as a warning. Only
+    # this docname is asserted on: the shared fixture's index also names a
+    # mount that this project does not declare, and that warning is genuine.
+    warning = app._warning.getvalue()
+    assert nfc not in warning and "caf" not in warning
+    assert nfc in app._status.getvalue()
+    assert mount_warnings.VARIANT_EXCLUDED_CODE in app._status.getvalue()
 
 
 def test_a_docname_another_file_still_provides_is_not_downgraded(make_app, tmp_path):
