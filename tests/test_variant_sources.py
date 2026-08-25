@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from io import StringIO
 import json
+import logging as stdlib_logging
 import os
 from pathlib import Path
 import shutil
@@ -31,6 +32,7 @@ from typing import Any
 
 import pytest
 from sphinx.application import Sphinx
+from sphinx.config import Config as SphinxConfig
 
 from sphinx_mounts import warnings as mount_warnings
 
@@ -53,6 +55,30 @@ def _detach_filters():
     """
     yield
     mount_warnings.remove_downgrade_filters()
+
+
+@pytest.fixture(autouse=True)
+def _restore_the_shared_source_suffix_default():
+    """Undo Sphinx's in-place mutation of a shared, class-level default.
+
+    ``source_suffix``'s registered default is one mutable dict on
+    ``Config.config_values``, and ``merge_source_suffix`` (``config-inited``
+    priority 800) mutates ``config.source_suffix`` IN PLACE. For a project that
+    never sets the confval, that object IS the shared default — so one test
+    loading ``myst_parser`` leaves ``.md`` in the default for every later
+    ``Config`` in the process.
+
+    That is not cosmetic here: it makes the root-document guard's fence pass
+    for the wrong reason. The MyST test below is red against the unfixed reader
+    in isolation and green in a module run without this fixture, which is the
+    worst possible shape for a regression test.
+    """
+    option = SphinxConfig.config_values["source_suffix"]
+    snapshot = dict(option.default) if isinstance(option.default, dict) else None
+    yield
+    if snapshot is not None:
+        option.default.clear()
+        option.default.update(snapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +275,21 @@ def _fails_under_dash_w(make_app, confdir: Path, builddir: Path) -> bool:
     except Exception:
         return True
     return app.statuscode != 0
+
+
+def _attribution() -> dict[str, str]:
+    """The docname -> rule map the installed downgrade filter is holding.
+
+    Read off the emitting loggers rather than off the app, because that is
+    where the attribution actually lives and what the filter actually consults.
+    An empty map means no filter is installed, which is the correct state for a
+    build that excluded nothing.
+    """
+    for name in mount_warnings.FALLBACK_LOGGER_NAMES:
+        for installed in stdlib_logging.getLogger(name).filters:
+            if isinstance(installed, mount_warnings.DowngradeFilter):
+                return dict(installed._excluded)
+    return {}
 
 
 def _pages(app) -> set[str]:
@@ -618,6 +659,144 @@ def test_an_unattributed_missing_document_still_warns(make_app, tmp_path):
     assert "WARNING" in warning
 
     assert _fails_under_dash_w(make_app, confdir, tmp_path / "b2")
+
+
+def test_a_warning_about_an_asset_path_is_never_downgraded(make_app, tmp_path):
+    """The attribution diff must use discovery's REAL inputs.
+
+    ``find_files`` excludes ``exclude_patterns + templates_path +
+    builder.get_asset_paths()``. Omitting the third put every source file under
+    ``html_extra_path`` / ``html_static_path`` into the "before" set, so gating
+    one of them minted a **phantom** docname — a name that was not a document
+    in this variant and not a document in any variant.
+
+    One phantom is enough to break the promise the whole downgrade rests on. In
+    this project a ``:glob:`` toctree over ``legacy/*`` matches nothing in
+    EVERY variant, because ``legacy/`` is an asset path and is never
+    discovered. That warning is genuine and version-independent — and flipping
+    the variant used to make it disappear, taking the ``-W`` failure with it.
+    """
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["old.rst"]
+
+    [needs.variant_data]
+    edition = "EDITION"
+    """
+    for edition in ("pro", "basic"):
+        confdir, _ = make_project(
+            tmp_path / edition,
+            toml=toml.replace("EDITION", edition),
+            conf_extra='html_extra_path = ["legacy"]',
+        )
+        _write(
+            confdir / "legacy" / "old.rst",
+            """
+            Legacy
+            ======
+        """,
+        )
+        index = confdir / "index.rst"
+        index.write_text(
+            index.read_text(encoding="utf-8")
+            + "\n.. toctree::\n   :glob:\n\n   legacy/*\n",
+            encoding="utf-8",
+        )
+        app = _build(make_app, confdir)
+        warning = app._warning.getvalue()
+        assert "legacy/*" in warning, (
+            f"edition={edition}: the empty-glob warning is genuine in every "
+            f"variant and must survive as a WARNING"
+        )
+        assert mount_warnings.VARIANT_EXCLUDED_CODE not in warning
+        assert _fails_under_dash_w(make_app, confdir, tmp_path / edition / "b2"), (
+            f"edition={edition}: and it must still fail -W"
+        )
+
+
+def test_a_docname_another_file_still_provides_is_not_downgraded(make_app, tmp_path):
+    """Gating one of two files that map to one docname leaves the doc ALIVE.
+
+    ``Project.discover`` keeps the first file claiming a docname and warns
+    about the rest, so ``a.rst`` beside ``a.md`` is one document. Diffing FILE
+    NAMES rather than docnames marked ``a`` excluded when only ``a.md`` was
+    gated — and then silently downgraded every toctree reference to a document
+    that is very much in the build. A fail-open in the opposite direction from
+    the phantom case, and invisible to the negative control.
+    """
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["dup.md"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(
+        tmp_path, toml=toml, conf_extra='extensions.append("myst_parser")'
+    )
+    _write(
+        confdir / "dup.rst",
+        """
+        Dup from RST
+        ============
+
+        DUP_RST_MARKER
+    """,
+    )
+    _write(confdir / "dup.md", "# Dup from Markdown\n\nDUP_MD_MARKER\n")
+    index = confdir / "index.rst"
+    index.write_text(
+        index.read_text(encoding="utf-8").replace("   hostkeep", "   dup\n   hostkeep"),
+        encoding="utf-8",
+    )
+    app = _build(make_app, confdir)
+    assert "dup.html" in _pages(app), "the .rst file still provides the docname"
+    assert "DUP_RST_MARKER" in (Path(app.outdir) / "dup.html").read_text(
+        encoding="utf-8"
+    )
+    # Asserted on the attribution set itself, not on a build outcome: with
+    # today's Sphinx warning inventory no warning names a docname that is IN
+    # the build, so a polluted set is a LATENT fail-open — every future warning
+    # naming `dup` would be wrongly downgraded, and nothing today would notice.
+    # The set is where the defect lives, so the set is what is fenced.
+    assert "dup" not in _attribution()
+    assert mount_warnings.VARIANT_EXCLUDED_CODE not in app._status.getvalue()
+
+
+def test_the_root_document_guard_sees_an_extension_registered_suffix(
+    make_app, tmp_path
+):
+    """A MyST project with an ``index.md`` root document.
+
+    An extension registers a suffix with ``app.add_source_suffix``, which
+    writes ``app.registry.source_suffix`` — a different place from the
+    ``source_suffix`` confval, which such a project never touches. Reading only
+    the confval made the guard test ``patmatch('index.rst', 'index.md')``, pass
+    the rule, and hand the user Sphinx's abort naming ``index.rst``: a file
+    that does not exist, which is worse than the misleading message the guard
+    exists to prevent.
+    """
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["index.md"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(
+        tmp_path, toml=toml, conf_extra='extensions.append("myst_parser")'
+    )
+    (confdir / "index.rst").unlink()
+    _write(confdir / "index.md", "# Host\n\n```{toctree}\nhostkeep\n```\n")
+    with pytest.raises(Exception) as excinfo:
+        _build(make_app, confdir)
+    message = str(excinfo.value)
+    assert "root document" in message
+    assert "variant_root_doc" in message
+    assert "unable to load the master document" not in message
 
 
 def test_the_filter_loggers_resolve_from_sphinx_itself(make_app, tmp_path):

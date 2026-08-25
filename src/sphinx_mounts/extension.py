@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+import os
 from pathlib import Path
 from typing import Any
 
@@ -722,7 +723,7 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
     host_patterns = tuple(
         (rule.label, tuple(_translated_host_patterns(rule))) for rule in excluding
     )
-    _guard_root_doc(config, host_patterns)
+    _guard_root_doc(app, config, host_patterns)
 
     base_exclude = tuple(config.exclude_patterns)
     appended = [pattern for _, patterns in host_patterns for pattern in patterns]
@@ -1029,7 +1030,9 @@ def _translated_host_patterns(rule: VariantRule) -> list[str]:
 
 
 def _guard_root_doc(
-    config: Config, host_patterns: tuple[tuple[str, tuple[str, ...]], ...]
+    app: Sphinx,
+    config: Config,
+    host_patterns: tuple[tuple[str, tuple[str, ...]], ...],
 ) -> None:
     """Refuse a FALSE rule that would exclude ``root_doc``.
 
@@ -1039,11 +1042,12 @@ def _guard_root_doc(
     the document is inside the source directory, and excluded. A user reading
     it spends the next ten minutes checking paths.
 
-    The check is **exact** here, and that is a deliberate divergence from
-    ubCode, whose equivalent guard is best-effort in one corner because it has
-    to infer candidate suffixes from the project's include globs.
-    ``config.source_suffix`` is a concrete registered list, so the candidate
-    paths are the real ones.
+    The candidate suffixes are the project's registered ones — the confval
+    UNION the extension registry, see :func:`_source_suffixes` — so the
+    candidate paths are the real ones, which is stronger than ubCode's guard on
+    that axis (it has to infer candidate suffixes from the project's include
+    globs and is best-effort in one corner). It is WEAKER on another: a root
+    document provided by a *mount* is not covered here and is covered there.
 
     Variant-**dependent**, unlike the glob-dialect refusal: a rule matching the
     root document is perfectly legal while its condition holds, so
@@ -1051,7 +1055,7 @@ def _guard_root_doc(
     variant only".
     """
     root_doc = getattr(config, "root_doc", "index")
-    candidates = [f"{root_doc}{suffix}" for suffix in _source_suffixes(config)]
+    candidates = [f"{root_doc}{suffix}" for suffix in _source_suffixes(app, config)]
     for label, patterns in host_patterns:
         for pattern in patterns:
             hit = next((c for c in candidates if patmatch(c, pattern)), None)
@@ -1069,21 +1073,37 @@ def _guard_root_doc(
             raise VariantRuleError(msg)
 
 
-def _source_suffixes(config: Config) -> tuple[str, ...]:
-    """Registered source suffixes, tolerating every shape of the confval.
+def _source_suffixes(app: Sphinx, config: Config) -> tuple[str, ...]:
+    """Every registered source suffix — the confval AND the registry.
 
-    Sphinx normalises ``source_suffix`` to a mapping in a ``config-inited``
-    handler at priority **800**, which is after this reader, so at this point
-    the value may still be the string or list the user wrote.
+    An extension adds a suffix with ``app.add_source_suffix``, which writes
+    ``app.registry.source_suffix`` — a different place from the ``source_suffix``
+    confval, which such a project never touches. Reading only the confval made
+    the root-document guard blind to exactly the mainstream case: a MyST
+    project with an ``index.md`` root document. The guard then tested
+    ``patmatch('index.rst', 'index.md')``, passed the rule, folded the pattern
+    in, and the user met Sphinx's abort — naming ``index.rst``, a file that
+    does not exist, which is worse than the misleading message the guard exists
+    to prevent.
+
+    The registry is fully populated at ``config-inited``: every extension's
+    ``setup()`` has already run.
+
+    Sphinx normalises the confval to a mapping in a ``config-inited`` handler
+    at priority **800**, which is after this reader, so the value may still be
+    the string or list the user wrote.
     """
     raw = getattr(config, "source_suffix", None)
     if isinstance(raw, str):
-        return (raw,)
-    if isinstance(raw, Mapping):
-        return tuple(raw)
-    if isinstance(raw, list | tuple):
-        return tuple(str(item) for item in raw)
-    return (".rst",)
+        from_confval: tuple[str, ...] = (raw,)
+    elif isinstance(raw, Mapping):
+        from_confval = tuple(raw)
+    elif isinstance(raw, list | tuple):
+        from_confval = tuple(str(item) for item in raw)
+    else:
+        from_confval = (".rst",)
+    registered = tuple(getattr(app.registry, "source_suffix", ()) or ())
+    return tuple(dict.fromkeys((*from_confval, *registered)))
 
 
 def _fold_into_mounts(
@@ -1258,35 +1278,90 @@ def _host_excluded_docnames(
 ) -> dict[str, str]:
     """Docnames the host arm removed, each mapped to the rule that removed it.
 
-    Computed as a diff of two ``get_matching_files`` passes — the same function
-    ``Project.discover`` itself goes through — so it cannot disagree with what
-    discovery actually did.
+    A diff of two passes over ``get_matching_files`` — the same function
+    ``Project.discover`` goes through — with the SAME inputs and the SAME
+    post-filters ``discover`` applies. Going through the same function with
+    different arguments is not the same thing, and each of the three
+    differences below invented docnames that were never documents:
+
+    * ``BuildEnvironment.find_files`` passes
+      ``exclude_patterns + templates_path + builder.get_asset_paths()``.
+      Omitting the third put every source file under ``html_extra_path`` /
+      ``html_static_path`` into the "before" set, so gating one of them made a
+      phantom docname — and a phantom is enough to downgrade a **genuine**
+      toctree warning and stop ``-W`` from failing. That is the one thing the
+      downgrade is not allowed to do.
+    * ``discover`` skips a file it cannot read (``os.access(.., R_OK)``), so an
+      unreadable gated file was a phantom too.
+    * ``discover`` keeps the FIRST file that claims a docname and warns about
+      the rest, so a docname is only excluded when NO surviving file still
+      provides it. Diffing file names instead meant that gating ``a.md``
+      beside a surviving ``a.rst`` marked the live docname ``a`` excluded, and
+      every toctree reference to it was silently downgraded — a fail-open in
+      the other direction.
+
+    Running at ``builder-inited`` is what makes the first of those available:
+    ``app.builder`` does not exist at ``config-inited``.
     """
     srcdir = Path(app.srcdir)
     base = [
         *state.base_exclude_patterns,
         *app.config.templates_path,
+        *_asset_paths(app),
         *EXCLUDE_PATHS,
     ]
     variant = [pattern for _, patterns in state.host_patterns for pattern in patterns]
     include = app.config.include_patterns
-    before = set(get_matching_files(srcdir, include, base))
-    after = set(get_matching_files(srcdir, include, [*base, *variant]))
+    before = _docname_providers(srcdir, include, base, suffixes)
+    after = _docname_providers(srcdir, include, [*base, *variant], suffixes)
     excluded: dict[str, str] = {}
-    for relative in sorted(before - after):
-        docname = _docname_for(relative, suffixes)
-        if docname is None:
+    for docname, files in sorted(before.items()):
+        if after.get(docname):
+            # Some other file still provides this docname, so the document is
+            # very much alive and a reference to it is not variant-excluded.
             continue
         label = next(
             (
                 label
                 for label, patterns in state.host_patterns
+                for relative in files
                 if any(patmatch(relative, pattern) for pattern in patterns)
             ),
             state.host_patterns[0][0],
         )
         excluded[docname] = label
     return excluded
+
+
+def _asset_paths(app: Sphinx) -> list[str]:
+    """The builder's own excluded asset paths, or nothing if it has none."""
+    builder = getattr(app, "builder", None)
+    get_asset_paths = getattr(builder, "get_asset_paths", None)
+    if get_asset_paths is None:  # pragma: no cover - every builder has one
+        return []
+    return list(get_asset_paths())
+
+
+def _docname_providers(
+    srcdir: Path,
+    include: list[str],
+    exclude: list[str],
+    suffixes: tuple[str, ...],
+) -> dict[str, list[str]]:
+    """Map each docname to the source files that would provide it.
+
+    Mirrors ``Project.discover``: only readable files count, and a docname may
+    have several providers (Sphinx keeps the first and warns about the rest).
+    """
+    providers: dict[str, list[str]] = {}
+    for relative in get_matching_files(srcdir, include, exclude):
+        docname = _docname_for(relative, suffixes)
+        if docname is None:
+            continue
+        if not os.access(srcdir / relative, os.R_OK):
+            continue
+        providers.setdefault(docname, []).append(relative)
+    return providers
 
 
 def _mount_excluded_docnames(
