@@ -818,36 +818,68 @@ Two further narrowings, both configuration errors:
   `true` / `false` is a *field name* to the parser and is refused with a message
   naming that mistake.
 
-#### Table 1b — the LEXICAL layer
+#### Table 1b — the spelling gate is a PORT, not an enumeration
 
-The accept-set above is necessary and **not sufficient**. Python's tokenizer
-normalises away spellings ubCode's lexer refuses outright, so a reader working
-from a parsed tree alone keeps finding new members of one class — and every
-member leaks: ubCode refuses, which makes the rule permanently false and
-EXCLUDES its files, while an AST-only reader evaluates and keeps them.
+The accept-set above is necessary and **not sufficient**, and the shape of the
+insufficiency is the important part. Python's tokenizer normalises away
+spellings ubCode's lexer refuses, so a reader validating a *parsed tree* is not
+closed over the difference: two independent review rounds each produced a fresh
+class of leak that no prior enumeration had a rule for — first whitespace and
+numeral bases, then comments, `not not`, parenthesised operands and NFKC
+identifier folding. Every member let a rule ubCode drops be kept, which is one
+string and two document sets.
 
-| Rule | Refused | Accepted |
-| --- | --- | --- |
-| word operators (`and` `or` `in` `is` `not`) sit between `ws+` | `not(x)`, `x and(y)`, `)or(`, `in['a']`, `2and y`, `'net'in x` | `not (x)`, `x and (y)`, doubled spaces, tabs |
-| comparison operators sit between `ws*` | — | `var.count>=2`, `var.edition=='pro'` |
-| a `var.*` access admits no whitespace around `.` | `var . name`, `var. name`, `var.name .startswith('x')` | `var.name` |
-| a method call admits none inside its parentheses, and no trailing comma | `.upper( )`, `.upper ()`, `.startswith( 'x' )`, `.startswith('x',)` | `.upper()`, `.startswith('x')` |
-| list literals: no trailing comma, and there is no tuple form | `['a',]`, `['a' ,]`, `('a','b')`, `('a',)` | `[ 'a' , 'b' ]` |
-| numerals are decimal, with no base prefix, no `_`, and a leading digit | `0x2`, `0X2`, `0b10`, `0o2`, `2_0`, `.5`, `-0x2` | `2`, `-2`, `0`, `2.`, `2.5`, `2e1`, `2E1`, `2.5e-1` |
-| implicit string concatenation has no rule | `'Wid' 'get'` | `'Widget'` |
+**So this section does not enumerate refusals, and a third reader should not
+implement one.** The rule is:
+
+> A condition is accepted only if **ubCode's own grammar derives it**. That
+> grammar is `rust/ubc_query/src/py_expr.pest`; port it, and run the port over
+> the RAW condition text before handing the text to whatever parser the reader
+> is built on.
+
+sphinx-mounts implements this as `_PestRecogniser` in
+`src/sphinx_mounts/variants.py` — a recursive-descent recogniser with one method
+per pest production, each citing the line it ports, reproducing PEG ordered
+choice and its backtracking. It is closed by construction: a spelling nobody
+anticipated is refused because the grammar cannot produce it, not because a
+rule was added for it.
+
+The consequences are therefore **derived, not declared**. Listed here so a
+reader can sanity-check a port, never as the specification:
+
+| Behaviour | Where it comes from |
+| --- | --- |
+| word operators (`and` `or` `in` `is` `not`) need whitespace on both sides; comparison operators do not | `ws+` in `or_expr`/`and_expr`/`in_list_expr`/`is_null_expr` (pest :5, :8, :61-65) vs `ws*` in `comparison_expr` (:45-52) |
+| no whitespace around a `var.*` dot; none inside a call's parentheses | `var_field` (:67), `var_field_with_upper` (:71-72), `str_predicate_method` (:108) are atomic |
+| no trailing comma in a list, and no tuple form at all | `list_literal` (:104-106); there is no tuple production |
+| decimal numerals only — no `0x`/`0b`/`0o`, no `_`, a leading digit before the point | `integer_literal` (:93), `decimal_literal` (:94), `float_literal` (:95) |
+| no comments | there is no comment production |
+| `not` does not chain (`not not x`), but `not (not (x))` does | `not_expr = not_keyword ~ ws+ ~ expr` (:12) — the body is an `expr`, and a `not_expr` is not one; a `paren_expr` is |
+| parentheses wrap a boolean sub-expression, never an operand | `paren_expr` (:15) is reachable only from `expr` |
+| field names are ASCII | `id_start` / `id_part` (:81-82) |
+| implicit string concatenation is not derivable | nothing can consume a second `string_literal` |
+
+Tolerances, equally derived and equally load-bearing — a port that refuses
+these is a divergence in the *other* direction, a project that builds there and
+aborts here:
+
+`var.count>=2`, `var.edition=='pro'`, `[ 'a' , 'b' ]`, doubled spaces, tabs and
+newlines as whitespace, `2.`, `2e1`, `2.5e-1`, `-2`, `var.name.upper().startswith('W')`,
+and a dotted `var.count.upper` with no parentheses (an ordinary field path — the
+`!("(")` lookahead at :67 only excludes a segment a call follows).
 
 String escapes are the one row handled by **mirroring rather than refusing**,
 because ubCode accepts them and merely reads a different string. Its decoder
-knows `\n \t \r \b \f \v \a \0 \\ \' \"` and leaves every other escape with its
+(`common.rs::process_escape_sequences`) knows
+`\n \t \r \b \f \v \a \0 \\ \' \"` and leaves every other escape with its
 backslash attached, so `'a\x41b'` is six characters there and four in Python. A
-reader must decode the same way; refusing instead would be a divergence of its
-own.
+reader must decode the same way.
 
-**A declared divergence in the fail-CLOSED direction.** ubCode's `ws` includes
-a newline, so a condition split across lines parses there; Python cannot parse
-a bare newline in an expression, so this reader refuses it. The build stops
-here and succeeds there — no leak, but a difference, recorded rather than
-discovered.
+**A declared divergence in the fail-CLOSED direction.** `ws` includes a newline
+(:119), so a condition split across lines is derivable there; Python cannot
+parse a bare newline in an expression, so this reader refuses it. Parenthesised,
+both accept. The build stops here and succeeds there — no leak, but a
+difference, recorded rather than discovered.
 
 #### Table 2 — the comparison semantics
 

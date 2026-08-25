@@ -1282,14 +1282,23 @@ extension.
    (``var.tags == var.build.features``), a wrongly-typed literal in a
    membership test (``2 in var.tags``), and ``'key' in var.some_table``.
 
-   Spelling matters too, and this is the part most likely to catch you:
-   ``not(x)``, ``x and(y)``, ``in['pro']``, ``var . name``, ``.upper( )``,
-   ``.startswith( 'x' )``, a **trailing comma** in a list (``['pro',]``), a
-   tuple (``('pro','x')``), and numerals written as ``0x2`` / ``0b10`` / ``2_0``
-   / ``.5`` are all configuration errors — the other reader's grammar has no
-   token for them, and accepting them here would mean one rule string and two
-   document sets. Whitespace *is* free where that grammar allows it:
-   ``var.count>=2``, ``[ 'a' , 'b' ]``, extra spaces and tabs are all fine.
+   **Spelling matters too**, and this is the part most likely to catch you.
+   A condition is accepted only if the other reader's own grammar can derive
+   it: sphinx-mounts recognises the raw text with a port of that grammar
+   before it parses anything, so a spelling only one of the two tools accepts
+   is refused rather than guessed at.
+
+   In practice that means ``not(x)``, ``x and(y)``, ``in['pro']``,
+   ``var . name``, ``.upper( )``, ``.startswith( 'x' )``, a **trailing comma**
+   in a list (``['pro',]``), a tuple (``('pro','x')``), a ``# comment``,
+   a doubled ``not not``, parentheses around an *operand* (``var.count == (2)``),
+   a non-ASCII field name, and numerals written as ``0x2`` / ``0b10`` / ``2_0``
+   / ``.5`` are all configuration errors. That list is illustrative, not
+   exhaustive — the rule is the grammar, not the list.
+
+   Whitespace *is* free wherever that grammar allows it: ``var.count>=2``,
+   ``[ 'a' , 'b' ]``, extra spaces, tabs, ``2.``, ``2e1``, ``-2`` and
+   ``not (not (x))`` are all fine.
 
    String escapes are read that reader's way: ``\n``, ``\t``, ``\r``, ``\b``,
    ``\f``, ``\v``, ``\a``, ``\0``, ``\\``, ``\'`` and ``\"`` are decoded and

@@ -39,6 +39,7 @@ import pytest
 from sphinx_mounts.variants import (
     VariantConditionError,
     VariantEvalError,
+    _PestRecogniser,
     evaluate,
     validate,
 )
@@ -308,6 +309,39 @@ LEXICAL_TABLE: list[tuple[str, Any]] = [
     ("var.count == -0x2", REJECT),
     ("var.edition == 'pro'\tand\tvar.count == 2", True),
     ("var.edition\t==\t'pro'", True),
+    # Four further classes, found only after the enumerated refusals were in
+    # place — which is the evidence that enumeration does not converge, and the
+    # reason the spelling gate is now a port of the sibling grammar rather than
+    # a list. Every one of these was in the LEAK direction before that port.
+    #
+    #   comments  — the reachable one: `if = "var.edition == 'pro'  # pro only"`
+    #               is an ordinary thing to write, and TOML passes the `#`
+    #               through a quoted string verbatim. That grammar has no
+    #               comment rule; Python's tokenizer strips it before an AST
+    #               exists.
+    #   not not   — `not` does not chain there: its body is an `expr`, and a
+    #               `not_expr` is not one. Parenthesised, it does chain.
+    #   ( operand ) — parentheses wrap a boolean sub-expression only, never an
+    #               operand; Python's AST discards them entirely.
+    #   NFKC      — Python folds identifiers, so a fullwidth n resolves the
+    #               real `name` key; that grammar's field names are ASCII.
+    ("var.count == 2 # trailing comment", REJECT),
+    ("var.count == 2#c", REJECT),
+    ("var.count == 2 and var.debug == False # c", REJECT),
+    ("var.count == 2 # 'quoted # hash'", REJECT),
+    ("var.count == 2 #", REJECT),
+    ("not not var.count == 2", REJECT),
+    ("not not not var.count == 2", REJECT),
+    ("var.count == (2)", REJECT),
+    ("var.count == ((2))", REJECT),
+    ("var.edition in (['pro'])", REJECT),
+    ("var.ｎame == 'Widget'", REJECT),  # noqa: RUF001 - fullwidth, deliberately
+    ("var.naᵐe == 'Widget'", REJECT),
+    ("not (not (var.count == 2))", True),
+    ("not (var.count == 2)", False),
+    ("var.café == 'x'", REJECT),
+    ("var.name == 'a#b'", False),
+    ("var.name == 'a and b'", False),
 ]
 
 
@@ -369,9 +403,87 @@ def test_the_lexical_table_covers_every_measured_class() -> None:
         "2_0",
         ".5",
         "\\x74",
+        # The four classes found after the enumerated refusals were in place.
+        "# trailing comment",
+        "not not ",
+        "== (2)",
+        "ｎame",  # noqa: RUF001 - fullwidth, deliberately
     ):
         assert spelling in text, spelling
-    assert len(LEXICAL_TABLE) >= 60
+    assert len(LEXICAL_TABLE) >= 80
+
+
+def test_the_grammar_gate_is_a_port_not_an_enumeration() -> None:
+    """The property that makes the class finite, asserted structurally.
+
+    Two rounds of review each produced a fresh spelling that an enumeration of
+    refusals had no rule for. What closes it is that the spelling gate now
+    *derives* — it accepts exactly what the sibling grammar derives and refuses
+    everything else, whether or not anyone thought of it.
+
+    So this test does not check a list. It takes spellings nobody enumerated
+    and asserts they are refused because the grammar cannot produce them.
+    """
+    for unheard_of in (
+        "var.count == 2 ;",
+        "var.count == 2 if True else False",
+        "var.count == 0_2",
+        "var.count == 2\\",
+        "var.count == 2 ]",
+        "var.name == 'x' 'y' 'z'",
+        "var.name == r'x'",
+        "var.name == f'x'",
+        "var.name == b'x'",
+        "lambda: var.count == 2",
+        "var.count == 2 == 2",
+        "var[0] == 2",
+        "var.count == 2 and",
+        "and var.count == 2",
+        "() == var.count",
+        "var.count == {1}",
+        "var.count == 2 % 3",
+    ):
+        assert not _PestRecogniser(unheard_of).accepts(), unheard_of
+        with pytest.raises(VariantConditionError):
+            validate(unheard_of)
+
+
+def test_the_recogniser_does_not_over_refuse() -> None:
+    """The fix's natural failure mode: refusing what the sibling ACCEPTS.
+
+    A blanket tightening would look identical to parity on the leak axis and
+    be a divergence in the other direction — a project that builds there and
+    aborts here. Every spelling below was measured accepted by that engine.
+    """
+    for accepted in (
+        "var.count>=2",
+        "var.edition=='pro'",
+        "var.edition == 'pro'  and  var.count == 2",
+        "var.edition\t==\t'pro'",
+        "var.edition in [ 'pro' , 'x' ]",
+        "not (var.count == 2)",
+        "not (not (var.count == 2))",
+        "(var.count == 2) or (var.debug == False)",
+        "var.count == 2.",
+        "var.count == 2e1",
+        "var.ratio == 2.5e-1",
+        "var.count == -2",
+        "var.name.upper().startswith('WID')",
+        "'net' in var.build.features",
+        "var.name == 'a and b'",
+        "var.name == 'a#b'",
+        "var.edition is not None",
+        "len(var.tags) > 1",
+        "search('pro', var.edition)",
+        "c.this_doc()",
+        "var.debug",
+        # A dotted `upper` with no parentheses is an ordinary field path —
+        # the `!("(")` lookahead only excludes a segment a call follows.
+        # Probed: ACCEPT.
+        "var.count.upper == 'X'",
+        "var.a.b.c == 1",
+    ):
+        assert _PestRecogniser(accepted).accepts(), accepted
 
 
 @pytest.mark.parametrize("row", UBCODE_TABLE, ids=_row_id)
@@ -480,7 +592,7 @@ def test_implicit_string_concatenation_is_refused() -> None:
     The folded constant evaluates TRUE where ubCode refuses the condition
     outright, so the source segment is read back to tell the two apart.
     """
-    with pytest.raises(VariantConditionError, match="one literal"):
+    with pytest.raises(VariantConditionError, match="shared grammar can read"):
         validate("var.name == 'Wid' 'get'")
     validate("var.name == 'Widget'")
 

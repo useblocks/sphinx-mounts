@@ -39,7 +39,6 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
-import re
 from typing import Any
 
 #: Leaf value types the variant data may hold.
@@ -252,42 +251,13 @@ def _receiver(node: ast.AST) -> ast.AST | None:
     return None
 
 
-def _is_single_string_literal(text: str, node: ast.Constant) -> bool:
-    """Whether a string ``Constant`` came from ONE quoted literal.
-
-    Python folds implicit concatenation (``'Wid' 'get'``) into a single
-    ``Constant`` at parse time, so the AST cannot tell the two apart — but
-    ubCode's grammar has no concatenation rule, and the folded value evaluates
-    TRUE where ubCode refuses the whole condition. The source segment is the
-    only place the difference survives, so it is read back.
-    """
-    segment = ast.get_source_segment(text, node)
-    if segment is None:  # pragma: no cover - defensive
-        return True
-    segment = segment.strip()
-    if len(segment) < _SHORTEST_QUOTED or segment[0] not in "'\"":
-        # A prefixed form (b'', f'', r'') — not a plain string literal anyway.
-        return False
-    quote = segment[0]
-    index = 1
-    while index < len(segment):
-        char = segment[index]
-        if char == "\\":
-            index += 2
-            continue
-        if char == quote:
-            return index == len(segment) - 1
-        index += 1
-    return False  # pragma: no cover - unterminated cannot parse
-
-
 def _negative_literal_kind(node: ast.UnaryOp) -> str | None:
     """Classify a ``-2`` / ``-1.5`` literal, or return ``None``.
 
     ubCode's ``integer_literal = @{ "-"? ~ … }`` makes the sign part of the
-    literal — but only when it is written against the digits. ``- 2`` and
-    ``+2`` are parse errors there, and Python's AST gives ``-2`` and ``- 2``
-    the same tree, so the column offsets are what separate them.
+    literal. The spellings that separate ``-2`` from ``- 2`` and from ``+2``
+    are the recogniser's business — it works on the raw text, where the
+    difference survives — so this only has to say what KIND the literal is.
     """
     if not isinstance(node.op, ast.USub):
         return None
@@ -296,12 +266,10 @@ def _negative_literal_kind(node: ast.UnaryOp) -> str | None:
         return None
     if not isinstance(operand.value, int | float):
         return None
-    if operand.col_offset != node.col_offset + 1:
-        return None
     return "int" if isinstance(operand.value, int) else "float"
 
 
-def _literal_kind(text: str, node: ast.AST) -> str | None:
+def _literal_kind(node: ast.AST) -> str | None:
     """Classify ``node`` as a scalar literal, or return ``None``.
 
     Returns one of ``"str"``, ``"bool"``, ``"int"``, ``"float"``, ``"null"``.
@@ -312,9 +280,7 @@ def _literal_kind(text: str, node: ast.AST) -> str | None:
         return None
     value = node.value
     if isinstance(value, str):
-        # The one kind that needs the source back: Python folds implicit
-        # concatenation into a single Constant, and ubCode has no such rule.
-        return "str" if _is_single_string_literal(text, node) else None
+        return "str"
     for kind, python_type in _CONSTANT_KINDS:
         if isinstance(value, python_type):
             return kind
@@ -364,7 +330,7 @@ def _literal_value(node: ast.AST) -> Any:
     raise VariantEvalError(msg)  # pragma: no cover
 
 
-def _scalar_list(text: str, node: ast.AST) -> list[ast.AST] | None:
+def _scalar_list(node: ast.AST) -> list[ast.AST] | None:
     """Return the elements of a list literal of scalars, or ``None``.
 
     A ``(…)`` tuple is deliberately not one: ubCode's grammar has a
@@ -373,7 +339,7 @@ def _scalar_list(text: str, node: ast.AST) -> list[ast.AST] | None:
     if not isinstance(node, ast.List):
         return None
     for element in node.elts:
-        if _literal_kind(text, element) is None:
+        if _literal_kind(element) is None:
             return None
     return list(node.elts)
 
@@ -426,7 +392,7 @@ def _refuse_operand(node: ast.AST, *, what: str) -> None:
     raise VariantConditionError(msg)
 
 
-def _validate_predicate_call(text: str, node: ast.Call) -> None:
+def _validate_predicate_call(node: ast.Call) -> None:
     """Validate a terminal ``.startswith(…)`` / ``.endswith(…)`` call."""
     func = node.func
     if not isinstance(func, ast.Attribute):  # pragma: no cover - caller checks
@@ -438,12 +404,12 @@ def _validate_predicate_call(text: str, node: ast.Call) -> None:
     if node.keywords:
         msg = "keyword arguments are not supported"
         raise VariantConditionError(msg)
-    if len(node.args) != 1 or _literal_kind(text, node.args[0]) != "str":
+    if len(node.args) != 1 or _literal_kind(node.args[0]) != "str":
         msg = f"`.{func.attr}()` takes exactly one string literal"
         raise VariantConditionError(msg)
 
 
-def _validate_compare(text: str, node: ast.Compare) -> None:
+def _validate_compare(node: ast.Compare) -> None:
     """Validate one comparison against TABLE 1's seven rows."""
     if len(node.ops) != 1:
         msg = "chained comparisons are not supported; write them with `and`"
@@ -454,7 +420,7 @@ def _validate_compare(text: str, node: ast.Compare) -> None:
     if isinstance(op, _IS_OPS):
         if _receiver(left) is None:
             _refuse_operand(left, what="operand")
-        if _literal_kind(text, right) != "null":
+        if _literal_kind(right) != "null":
             msg = "`is` / `is not` may only be used with `None`"
             raise VariantConditionError(msg)
         return
@@ -462,10 +428,10 @@ def _validate_compare(text: str, node: ast.Compare) -> None:
     if isinstance(op, _IN_OPS):
         if _receiver(right) is not None:
             # `literal in var.field` — the container is the field.
-            if _literal_kind(text, left) is None:
+            if _literal_kind(left) is None:
                 _refuse_operand(left, what="left operand")
             return
-        elements = _scalar_list(text, right)
+        elements = _scalar_list(right)
         if elements is None:
             if isinstance(right, ast.Name | ast.Attribute):
                 _refuse_bare_name(_dotted(right))
@@ -481,11 +447,11 @@ def _validate_compare(text: str, node: ast.Compare) -> None:
         return
 
     if isinstance(op, _EQ_OPS):
-        _validate_symmetric(text, left, right, literal_kinds=None)
+        _validate_symmetric(left, right, literal_kinds=None)
         return
 
     if isinstance(op, _ORDER_OPS):
-        _validate_symmetric(text, left, right, literal_kinds=("int", "float"))
+        _validate_symmetric(left, right, literal_kinds=("int", "float"))
         return
 
     msg = f"unsupported comparison operator `{type(op).__name__}`"
@@ -493,7 +459,6 @@ def _validate_compare(text: str, node: ast.Compare) -> None:
 
 
 def _validate_symmetric(
-    text: str,
     left: ast.AST,
     right: ast.AST,
     *,
@@ -510,10 +475,7 @@ def _validate_symmetric(
     if left_receiver and right_receiver:
         return
     if not left_receiver and not right_receiver:
-        if (
-            _literal_kind(text, left) is not None
-            and _literal_kind(text, right) is not None
-        ):
+        if _literal_kind(left) is not None and _literal_kind(right) is not None:
             msg = (
                 "a comparison must reference the variant data; a comparison "
                 "between two literals is always the same answer and is not part "
@@ -522,7 +484,7 @@ def _validate_symmetric(
             raise VariantConditionError(msg)
         _refuse_operand(left if _receiver(left) is None else right, what="operand")
     literal_side = right if left_receiver else left
-    kind = _literal_kind(text, literal_side)
+    kind = _literal_kind(literal_side)
     if kind is None:
         _refuse_operand(literal_side, what="operand")
     if literal_kinds is not None and kind not in literal_kinds:
@@ -580,7 +542,7 @@ def _validate_boolean(text: str, node: ast.AST) -> None:
         _validate_boolean(text, node.operand)
         return
     if isinstance(node, ast.Compare):
-        _validate_compare(text, node)
+        _validate_compare(node)
         return
     if isinstance(node, ast.Constant) and isinstance(node.value, bool):
         return
@@ -590,7 +552,7 @@ def _validate_boolean(text: str, node: ast.AST) -> None:
             # Type-aware: `.startswith()` / `.endswith()` return `bool`, so a
             # bare call IS a valid boolean top level (corpus rows 16, 17);
             # `.upper()` / `.lower()` return `str` and are not (rows 34, 35).
-            _validate_predicate_call(text, node)
+            _validate_predicate_call(node)
             return
         if isinstance(func, ast.Attribute) and func.attr in _TRANSFORM_METHODS:
             _refuse_non_boolean(node)
@@ -599,49 +561,512 @@ def _validate_boolean(text: str, node: ast.AST) -> None:
 
 
 # ---------------------------------------------------------------------------
-# TABLE 1b — the LEXICAL layer
+# TABLE 1b — the GRAMMAR RECOGNISER
 # ---------------------------------------------------------------------------
 #
-# The kind-level table above is necessary and NOT sufficient. Python's
-# tokenizer normalises away spellings ubCode's lexer refuses outright, so a
-# validator working from the `ast` alone keeps finding new members of one
-# class: `0x2` and `2_0` and `.5` all become plain numbers, `'Wid' 'get'`
-# becomes one string, `'a\x74'` becomes `'at'`, and every one of `not(x)`,
-# `x and(y)`, `var . name`, `.upper( )`, `in['pro']` and `['pro',]` parses
-# identically to its spaced or comma-less twin.
+# The kind-level table above works on Python's parsed tree. Python's tokenizer
+# normalises away spellings ubCode's lexer refuses, so a validator working from
+# the tree alone is not CLOSED: two rounds of review each produced a fresh
+# class of leak (whitespace and numeral bases; then comments, `not not`,
+# parenthesised operands, NFKC identifier folding), and every one of them let a
+# rule ubCode drops be kept here — one string, two document sets.
 #
-# Every cell below was measured against the shipped engine, and every one is in
-# the LEAK direction: ubCode refuses, which makes the rule permanently false and
-# EXCLUDES its files, while an AST-only reader evaluates and keeps them.
+# Enumerating refusals cannot converge on that, so this is not an enumeration.
+# `_PestRecogniser` is a faithful port of ubCode's own grammar,
+# `rust/ubc_query/src/py_expr.pest`, production by production, run over the RAW
+# condition text BEFORE `ast.parse` sees it. It is closed by construction:
+# anything the grammar does not derive is refused, whether or not anyone
+# thought of it. Each method cites the pest line it ports.
 #
-# The rules, read off `rust/ubc_query/src/py_expr.pest`:
+# Two gates, deliberately: the recogniser owns SPELLING, and the AST pass above
+# owns KINDS and SEMANTICS. Both must accept. The recogniser is therefore
+# permissive about things ubCode's later passes refuse — a bare `var.debug`
+# parses in pest and is refused by its DNF whitelist, exactly as it parses here
+# and is refused by `_validate_boolean`.
 #
-#   * `not_expr = not_keyword ~ ws+ ~ expr`, and `and`/`or`/`in`/`is` all sit
-#     between `ws+` on BOTH sides. So `not(`, `and(`, `)or(`, `in[`, `2and`
-#     and `'net'in` are parse errors there. Comparison operators are the
-#     exception — `comparison_expr` uses `ws*`, so `var.count>=2` is fine.
-#   * `var_field = symbolic_name_simple ~ ("." ~ symbolic_name_simple …)` and
-#     `var_field_with_upper = var_field ~ (".upper()")` admit NO whitespace, so
-#     `var . name`, `var. name` and `.upper( )` are refused.
-#   * `str_predicate_method = "." ~ name ~ "(" ~ string_literal ~ ")"` — no
-#     whitespace inside the parens and no trailing comma.
-#   * `list_literal` has no trailing comma and there is no `(...)` tuple form,
-#     though `[ 'a' , 'b' ]` is fine (`ws*` between the parts).
-#   * `integer_literal = "-"? ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*)`,
-#     `decimal_literal = integer ~ "." ~ ASCII_DIGIT*`, `exp = ^"E" ~ integer`
-#     — decimal only, no `_` separators, and a fraction needs a leading digit.
-#   * strings are decoded by `common.rs::process_escape_sequences`, which knows
-#     `\n \t \r \b \f \v \a \0 \\ \' \"` and leaves everything else as a literal
-#     backslash. Python decodes `\x41`, `\101`, `\u0041` too. Rather than refuse
-#     those — ubCode ACCEPTS them, it just reads a different string — the
-#     literal is re-decoded ubCode's way and written back onto the tree, so the
-#     interpreter stays a pure function of the tree and the two engines compare
-#     the same characters.
+# PEG semantics are reproduced, not approximated: an ordered choice commits to
+# the first alternative that matches at a position, and a repetition stops at
+# the first item that does not. Backtracking happens WITHIN a choice (each
+# alternative restores the position on failure) and not across one that has
+# already succeeded — which is what makes `var.count == 2 # c` fail at EOI
+# rather than silently re-parsing.
 
-#: ubCode's numeral shapes, transcribed from the three pest rules.
-_NUMERAL = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]*)?(?:[eE]-?(?:0|[1-9][0-9]*))?\Z")
 
-#: The escapes `process_escape_sequences` decodes. Anything else keeps its
+class _PestRecogniser:
+    """A recursive-descent recogniser for `py_expr.pest`.
+
+    Recognises only — no tree is built, because the AST pass already has one.
+    :meth:`accepts` answers the single question this class exists for: would
+    ubCode's parser derive this text?
+    """
+
+    #: `reserved` (pest :74). A reserved word is a field name ONLY when it
+    #: continues into a longer identifier (`Trueish`, `is_external`).
+    _RESERVED = ("None", "True", "False", "and", "or", "not", "in", "is")
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.pos = 0
+
+    # -- primitives ---------------------------------------------------------
+
+    def _at(self, literal: str) -> bool:
+        """Consume ``literal`` if it is next."""
+        if self.text.startswith(literal, self.pos):
+            self.pos += len(literal)
+            return True
+        return False
+
+    def _peek(self) -> str:
+        return self.text[self.pos] if self.pos < len(self.text) else ""
+
+    def _ws(self) -> bool:
+        """`ws` (pest :119) — space, tab, newline. Note: NOT carriage return."""
+        if self._peek() in (" ", "\t", "\n"):
+            self.pos += 1
+            return True
+        return False
+
+    def _ws_star(self) -> None:
+        while self._ws():
+            pass
+
+    def _ws_plus(self) -> bool:
+        if not self._ws():
+            return False
+        self._ws_star()
+        return True
+
+    def _choice(self, *alternatives) -> bool:
+        """PEG ordered choice: first alternative that matches wins."""
+        for alternative in alternatives:
+            save = self.pos
+            if alternative():
+                return True
+            self.pos = save
+        return False
+
+    def _seq(self, *parts) -> bool:
+        """PEG sequence: all or nothing, restoring the position on failure."""
+        save = self.pos
+        for part in parts:
+            if not (part() if callable(part) else self._at(part)):
+                self.pos = save
+                return False
+        return True
+
+    # -- identifiers (pest :74-82) -----------------------------------------
+
+    @staticmethod
+    def _is_id_start(char: str) -> bool:
+        """`id_start` (:81) — ASCII only, which is what refuses a folded
+        fullwidth or modifier letter that Python's NFKC would accept."""
+        return char == "_" or ("a" <= char <= "z") or ("A" <= char <= "Z")
+
+    @classmethod
+    def _is_id_part(cls, char: str) -> bool:
+        """`id_part` (:82)."""
+        return cls._is_id_start(char) or ("0" <= char <= "9")
+
+    def _symbolic_name_simple(self) -> bool:
+        """`symbolic_name_simple` (:80) — `!(reserved ~ !id_part) ~ id_start ~ id_part*`."""
+        for word in self._RESERVED:
+            if self.text.startswith(word, self.pos):
+                after = self.pos + len(word)
+                nxt = self.text[after] if after < len(self.text) else ""
+                if not self._is_id_part(nxt):
+                    return False  # it is the keyword, never a field
+        if not self._is_id_start(self._peek()):
+            return False
+        self.pos += 1
+        while self._is_id_part(self._peek()):
+            self.pos += 1
+        return True
+
+    def _var_field(self) -> bool:
+        """`var_field` (:67) — dotted segments, each with `!("(")` after it."""
+        if not self._symbolic_name_simple():
+            return False
+        while True:
+            save = self.pos
+            if not self._at("."):
+                return True
+            if not self._symbolic_name_simple():
+                self.pos = save
+                return True
+            if self._peek() == "(":
+                # The negative lookahead: a segment followed by `(` belongs to
+                # `.upper()` / `.startswith(…)`, not to the field.
+                self.pos = save
+                return True
+
+    def _var_field_with_func(self) -> bool:
+        """`var_field_with_func` (:69) — len / upper / lower / bare, in order."""
+        return self._choice(
+            lambda: self._seq("len(", self._var_field, ")"),
+            lambda: self._seq(self._var_field, ".upper()"),
+            lambda: self._seq(self._var_field, ".lower()"),
+            self._var_field,
+        )
+
+    # -- literals (pest :84-106) -------------------------------------------
+
+    def _integer_literal(self) -> bool:
+        """`integer_literal` (:93) — `"-"? ~ ("0" | NONZERO ~ DIGIT*)`."""
+        save = self.pos
+        self._at("-")
+        char = self._peek()
+        if char == "0":
+            self.pos += 1
+            return True
+        if "1" <= char <= "9":
+            self.pos += 1
+            while "0" <= self._peek() <= "9":
+                self.pos += 1
+            return True
+        self.pos = save
+        return False
+
+    def _decimal_literal(self) -> bool:
+        """`decimal_literal` (:94) — `integer ~ "." ~ DIGIT*`."""
+        save = self.pos
+        if not self._integer_literal() or not self._at("."):
+            self.pos = save
+            return False
+        while "0" <= self._peek() <= "9":
+            self.pos += 1
+        return True
+
+    def _exp(self) -> bool:
+        """`exp` (:96) — case-insensitive `E` then an integer."""
+        save = self.pos
+        if self._peek() not in ("e", "E"):
+            return False
+        self.pos += 1
+        if not self._integer_literal():
+            self.pos = save
+            return False
+        return True
+
+    def _float_literal(self) -> bool:
+        """`float_literal` (:95) — `integer ~ exp | decimal ~ exp?`."""
+        return self._choice(
+            lambda: self._seq(self._integer_literal, self._exp),
+            lambda: self._seq(self._decimal_literal, lambda: (self._exp(), True)[1]),
+        )
+
+    def _number_literal(self) -> bool:
+        """`number_literal` (:92) — float, decimal, integer, in that order."""
+        return self._choice(
+            self._float_literal, self._decimal_literal, self._integer_literal
+        )
+
+    def _string_literal(self) -> bool:
+        """`string_literal` (:98-102) — a backslash escapes the NEXT character
+        for lexing only; nothing is decoded here."""
+        quote = self._peek()
+        if quote not in ("'", '"'):
+            return False
+        save = self.pos
+        self.pos += 1
+        while self.pos < len(self.text):
+            char = self.text[self.pos]
+            if char == "\\":
+                self.pos += 2
+                continue
+            self.pos += 1
+            if char == quote:
+                return True
+        self.pos = save
+        return False
+
+    def _boolean_literal(self) -> bool:
+        """`boolean_literal` (:87)."""
+        return self._at("True") or self._at("False")
+
+    def _null_literal(self) -> bool:
+        """`null_literal` (:88)."""
+        return self._at("None")
+
+    def _literal_single(self) -> bool:
+        """`literal_single` (:84) — no list."""
+        return self._choice(
+            self._null_literal,
+            self._boolean_literal,
+            self._number_literal,
+            self._string_literal,
+        )
+
+    def _list_literal(self) -> bool:
+        """`list_literal` (:104-106) — no trailing comma, and no tuple form."""
+        save = self.pos
+        if not self._at("["):
+            return False
+        self._ws_star()
+        if self._literal_single():
+            self._ws_star()
+            while True:
+                item = self.pos
+                if not (
+                    self._at(",")
+                    and (self._ws_star() or True)
+                    and self._literal_single()
+                ):
+                    self.pos = item
+                    break
+                self._ws_star()
+        if not self._at("]"):
+            self.pos = save
+            return False
+        return True
+
+    def _literal(self) -> bool:
+        """`literal` (:85) — `literal_single` plus a list."""
+        return self._choice(self._literal_single, self._list_literal)
+
+    # -- operators and suffixes (pest :40-65, :108-113) --------------------
+
+    def _str_predicate_method(self) -> bool:
+        """`str_predicate_method` (:108) — no whitespace, no trailing comma."""
+        return self._seq(
+            ".",
+            lambda: self._at("startswith") or self._at("endswith"),
+            "(",
+            self._string_literal,
+            ")",
+        )
+
+    def _comparison_expr(self) -> bool:
+        """`comparison_expr` (:45-52). `ws*`, so operators need no spacing.
+
+        The operator order is pest's: `<` is tried before `<=`, and the `<=`
+        input only reaches its own alternative because the `<` one fails on the
+        `=` that follows.
+        """
+
+        def cmp(operator: str, right) -> bool:
+            return self._seq(
+                lambda: (self._ws_star(), True)[1],
+                operator,
+                lambda: (self._ws_star(), True)[1],
+                right,
+            )
+
+        either = lambda: self._choice(self._literal, self._var_field_with_func)  # noqa: E731
+        number = lambda: self._choice(self._number_literal, self._var_field_with_func)  # noqa: E731
+        return self._choice(
+            lambda: cmp("==", either),
+            lambda: cmp("!=", either),
+            lambda: cmp("<", number),
+            lambda: cmp(">", number),
+            lambda: cmp("<=", number),
+            lambda: cmp(">=", number),
+        )
+
+    def _is_null_expr(self) -> bool:
+        """`is_null_expr` (:61)."""
+        return self._seq(self._ws_plus, "is", self._ws_plus, "None")
+
+    def _is_not_null_expr(self) -> bool:
+        """`is_not_null_expr` (:62)."""
+        return self._seq(
+            self._ws_plus, "is", self._ws_plus, "not", self._ws_plus, "None"
+        )
+
+    def _in_list_expr(self) -> bool:
+        """`in_list_expr` (:64) — a list literal or a bare field on the right."""
+        return self._seq(
+            self._ws_plus,
+            "in",
+            self._ws_plus,
+            lambda: self._choice(self._list_literal, self._var_field),
+        )
+
+    def _not_in_list_expr(self) -> bool:
+        """`not_in_list_expr` (:65)."""
+        return self._seq(
+            self._ws_plus,
+            "not",
+            self._ws_plus,
+            "in",
+            self._ws_plus,
+            lambda: self._choice(self._list_literal, self._var_field),
+        )
+
+    # -- expressions (pest :3-43) ------------------------------------------
+
+    def _var_field_op_expr(self) -> bool:
+        """`var_field_op_expr` (:40-43) — a field plus at most one suffix."""
+        if not self._var_field_with_func():
+            return False
+        save = self.pos
+        if not self._choice(
+            self._in_list_expr,
+            self._not_in_list_expr,
+            self._is_null_expr,
+            self._is_not_null_expr,
+            self._comparison_expr,
+            self._str_predicate_method,
+        ):
+            self.pos = save  # the suffix is optional
+        return True
+
+    def _literal_in_var_field_expr(self) -> bool:
+        """`literal_in_var_field_expr` (:17)."""
+        return self._seq(
+            self._literal_single,
+            self._ws_plus,
+            "in",
+            self._ws_plus,
+            self._var_field_with_func,
+        )
+
+    def _literal_not_in_var_field_expr(self) -> bool:
+        """`literal_not_in_var_field_expr` (:21)."""
+        return self._seq(
+            self._literal_single,
+            self._ws_plus,
+            "not",
+            self._ws_plus,
+            "in",
+            self._ws_plus,
+            self._var_field_with_func,
+        )
+
+    def _literal_cmp_var_field_expr(self) -> bool:
+        """`literal_cmp_var_field_expr` (:26-33) — the Yoda forms.
+
+        Only `==` / `!=` take any `literal_single` on the left; the ordering
+        operators take a `number_literal` only.
+        """
+
+        def yoda(left, operator: str) -> bool:
+            return self._seq(
+                left,
+                lambda: (self._ws_star(), True)[1],
+                operator,
+                lambda: (self._ws_star(), True)[1],
+                self._var_field_with_func,
+            )
+
+        return self._choice(
+            lambda: yoda(self._literal_single, "=="),
+            lambda: yoda(self._literal_single, "!="),
+            lambda: yoda(self._number_literal, "<"),
+            lambda: yoda(self._number_literal, ">"),
+            lambda: yoda(self._number_literal, "<="),
+            lambda: yoda(self._number_literal, ">="),
+        )
+
+    def _paren_expr(self) -> bool:
+        """`paren_expr` (:15) — parentheses wrap a BOOLEAN sub-expression only,
+        never an operand, which is why `var.count == (2)` is not derivable."""
+        return self._seq(
+            "(",
+            lambda: (self._ws_star(), True)[1],
+            self._or_expr,
+            lambda: (self._ws_star(), True)[1],
+            ")",
+        )
+
+    def _expr(self) -> bool:
+        """`expr` (:11) — the ordered choice, `bool_literal_expr` last."""
+        return self._choice(
+            self._paren_expr,
+            lambda: self._at("c.this_doc()"),
+            lambda: self._seq(
+                "search(",
+                self._string_literal,
+                ",",
+                lambda: (self._ws_star(), True)[1],
+                self._var_field_with_func,
+                ")",
+            ),
+            self._var_field_op_expr,
+            self._literal_in_var_field_expr,
+            self._literal_not_in_var_field_expr,
+            self._literal_cmp_var_field_expr,
+            self._boolean_literal,
+        )
+
+    def _not_expr(self) -> bool:
+        """`not_expr` (:12) — the body is `expr`, NOT `not_expr`, so `not` does
+        not chain: `not not x` is not derivable."""
+        return self._seq("not", self._ws_plus, self._expr)
+
+    def _operand(self) -> bool:
+        """`(expr | not_expr)` as it appears in `and_expr` (:8)."""
+        return self._choice(self._expr, self._not_expr)
+
+    def _and_expr(self) -> bool:
+        """`and_expr` (:8) — `and` sits between `ws+` on both sides."""
+        if not self._operand():
+            return False
+        while True:
+            save = self.pos
+            if not self._seq(self._ws_plus, "and", self._ws_plus, self._operand):
+                self.pos = save
+                return True
+
+    def _or_expr(self) -> bool:
+        """`or_expr` (:5) — `or` sits between `ws+` on both sides."""
+        if not self._and_expr():
+            return False
+        while True:
+            save = self.pos
+            if not self._seq(self._ws_plus, "or", self._ws_plus, self._and_expr):
+                self.pos = save
+                return True
+
+    def accepts(self) -> bool:
+        """`start` (:3) — `SOI ~ ws* ~ or_expr ~ ws* ~ EOI`.
+
+        The trailing EOI is what refuses a comment: pest has no comment rule,
+        so `# …` is simply text the grammar cannot consume.
+        """
+        self._ws_star()
+        if not self._or_expr():
+            return False
+        self._ws_star()
+        return self.pos == len(self.text)
+
+
+def _check_grammar(text: str) -> None:
+    """Refuse anything ubCode's own grammar would not derive.
+
+    Runs BEFORE :func:`ast.parse`, so a spelling Python would normalise away
+    never reaches the tree.
+    """
+    if not _PestRecogniser(text).accepts():
+        msg = (
+            "this is not a condition the shared grammar can read. It is a "
+            "deliberately small language — comparisons, `in` / `not in`, "
+            "`is None` / `is not None`, `.startswith(…)` / `.endswith(…)`, "
+            "`and` / `or` / `not` with parentheses, `var.*` access and the "
+            "literals `True` / `False` — and its spelling is fixed: the word "
+            "operators need whitespace around them (comparison operators do "
+            "not), there are no comments, no tuples, no trailing commas, no "
+            "parentheses around an operand, no doubled `not`, and numerals are "
+            "decimal with no base prefix and no `_` separators. Every reader "
+            "of this file must agree on which files a rule gates, so a "
+            "spelling only some of them accept is refused rather than guessed"
+        )
+        raise VariantConditionError(msg)
+
+
+# ---------------------------------------------------------------------------
+# The one MIRRORED spelling: string escapes
+# ---------------------------------------------------------------------------
+#
+# Not a refusal, so the recogniser cannot own it: ubCode ACCEPTS every escape
+# and merely DECODES a smaller set than Python does. Its
+# `common.rs::process_escape_sequences` knows `\n \t \r \b \f \v \a \0 \\ \' \"`
+# and leaves everything else with its backslash attached, so `'a\x41b'` is six
+# characters there and four here. Refusing would be a divergence of its own, so
+# the literal is re-decoded ubCode's way and written back onto the tree — which
+# keeps the interpreter a pure function of the tree.
+
+#: The escapes `process_escape_sequences` decodes; everything else keeps its
 #: backslash, which is where it parts company with Python.
 _UBCODE_ESCAPES = {
     "n": "\n",
@@ -656,10 +1081,6 @@ _UBCODE_ESCAPES = {
     "'": "'",
     '"': '"',
 }
-
-#: Keywords pest surrounds with `ws+`. Comparison operators are deliberately
-#: absent: they sit between `ws*` and need no spacing.
-_SPACED_KEYWORDS = ("and", "or", "in", "is", "not")
 
 
 def _ubcode_unescape(raw: str) -> str:
@@ -676,164 +1097,22 @@ def _ubcode_unescape(raw: str) -> str:
             continue
         following = raw[index + 1]
         decoded = _UBCODE_ESCAPES.get(following)
-        # An unrecognised escape keeps its backslash — Python decodes `\x41`
-        # and `\101` and this does not, which is the whole divergence.
         out.append(decoded if decoded is not None else "\\" + following)
         index += 2
     return "".join(out)
 
 
-#: The character string literals are masked with for the keyword scan.
-#:
-#: Deliberately NOT a word character: masking with ``_`` merged the mask into
-#: an adjacent keyword, so ``'pro'and`` scanned as one identifier and the
-#: missing space went unnoticed.
-_MASK = "\x00"
-
-
-def _mask_strings(text: str) -> str:
-    """``text`` with every string literal's characters replaced by :data:`_MASK`.
-
-    The keyword-spacing scan runs over this, so an ``and`` inside a quoted
-    string cannot be mistaken for the operator.
-    """
-    out: list[str] = []
-    quote = ""
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if quote:
-            out.append(_MASK)
-            if char == "\\" and index + 1 < len(text):
-                out.append(_MASK)
-                index += 2
-                continue
-            if char == quote:
-                quote = ""
-            index += 1
-            continue
-        if char in "'\"":
-            quote = char
-            out.append(_MASK)
-            index += 1
-            continue
-        out.append(char)
-        index += 1
-    return "".join(out)
-
-
-def _check_keyword_spacing(text: str) -> None:
-    """Require the whitespace pest requires around the word operators."""
-    masked = _mask_strings(text)
-    for match in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", masked):
-        word = match.group()
-        if word not in _SPACED_KEYWORDS:
-            continue
-        start, end = match.span()
-        before = masked[start - 1] if start else ""
-        after = masked[end] if end < len(masked) else ""
-        # `not` may open an expression or follow `(`; every other keyword sits
-        # between two operands and needs whitespace on both sides.
-        opens = word == "not" and before in {"", "("}
-        if not (opens or before.isspace()):
-            _refuse_spacing(word, "before")
-        if after and not after.isspace():
-            _refuse_spacing(word, "after")
-        if not after and word != "None":
-            _refuse_spacing(word, "after")
-
-
-def _refuse_spacing(word: str, side: str) -> None:
-    msg = (
-        f"`{word}` needs whitespace {side} it. The shared grammar spells the "
-        f"word operators with spaces around them, so `not(…)`, `x and(y)`, "
-        f"`in['a']` and `2and y` are refused there while Python accepts them — "
-        f"one rule string, two document sets. Comparison operators are "
-        f"different: `var.count>=2` is fine"
-    )
-    raise VariantConditionError(msg)
-
-
-def _check_lexical(text: str, node: ast.AST) -> None:
-    """Re-check every literal and every dotted access against ubCode's lexer.
-
-    Walks the validated tree, reads each node's own source segment back, and
-    refuses the spellings the shared grammar has no token for. String literals
-    are additionally re-decoded ubCode's way and written back onto the tree
-    (see the module note above).
-    """
-    _check_keyword_spacing(text)
+def _mirror_string_literals(text: str, node: ast.AST) -> None:
+    """Rewrite every string literal to the value ubCode's lexer would read."""
     for child in ast.walk(node):
+        if not isinstance(child, ast.Constant) or not isinstance(child.value, str):
+            continue
         segment = ast.get_source_segment(text, child)
         if segment is None:
             continue
-        if isinstance(child, ast.Tuple):
-            msg = (
-                "a tuple literal is not part of the shared grammar; write a "
-                "list — `var.field in ['a', 'b']`"
-            )
-            raise VariantConditionError(msg)
-        if isinstance(child, ast.List):
-            _check_list_spelling(segment)
-        elif isinstance(child, ast.Attribute):
-            _check_dotted_spelling(segment)
-        elif isinstance(child, ast.Call):
-            _check_call_spelling(segment)
-        elif isinstance(child, ast.Constant):
-            _check_constant_spelling(child, segment)
-
-
-def _check_list_spelling(segment: str) -> None:
-    """No trailing comma: ubCode's `list_literal` has no rule for one."""
-    body = segment.strip()
-    if body.startswith("[") and body.endswith("]") and body[1:-1].strip().endswith(","):
-        msg = (
-            "a trailing comma in a list literal is not part of the shared "
-            "grammar — most formatters add one, and it is refused there while "
-            "Python ignores it; remove it"
-        )
-        raise VariantConditionError(msg)
-
-
-def _check_dotted_spelling(segment: str) -> None:
-    """No whitespace around a `.`: `var_field` admits none."""
-    if re.search(r"\s\.|\.\s", segment):
-        msg = (
-            "a `var.*` access may not carry whitespace around its dots; write "
-            "`var.field`, not `var . field`"
-        )
-        raise VariantConditionError(msg)
-
-
-def _check_call_spelling(segment: str) -> None:
-    """No whitespace before or inside a method call's parentheses."""
-    if re.search(r"\s\(|\(\s|\s\)", segment) or re.search(r",\s*\)", segment):
-        msg = (
-            "a method call may not carry whitespace inside its parentheses or "
-            "a trailing comma; write `.upper()` and `.startswith('x')`"
-        )
-        raise VariantConditionError(msg)
-
-
-def _check_constant_spelling(node: ast.Constant, segment: str) -> None:
-    """Numerals must match ubCode's shapes; strings are re-decoded its way."""
-    value = node.value
-    if isinstance(value, bool) or value is None:
-        return
-    if isinstance(value, int | float):
-        if not _NUMERAL.match(segment.strip()):
-            msg = (
-                f"`{segment.strip()}` is not a numeral the shared grammar can "
-                f"read: it spells numbers in decimal only, with no `0x` / `0b` "
-                f"/ `0o` base prefix, no `_` separators, and a leading digit "
-                f"before the point (`0.5`, not `.5`)"
-            )
-            raise VariantConditionError(msg)
-        return
-    if isinstance(value, str):
         body = segment.strip()
         if len(body) >= _SHORTEST_QUOTED and body[0] in "'\"":
-            node.value = _ubcode_unescape(body[1:-1])
+            child.value = _ubcode_unescape(body[1:-1])
 
 
 def validate(expr: str) -> ast.expr:
@@ -847,6 +1126,10 @@ def validate(expr: str) -> ast.expr:
     if not text:
         msg = "the condition is empty"
         raise VariantConditionError(msg)
+    # Gate one: would ubCode's own grammar derive this text at all? Runs BEFORE
+    # `ast.parse`, so a spelling Python's tokenizer would normalise away never
+    # reaches the tree.
+    _check_grammar(text)
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
@@ -856,10 +1139,11 @@ def validate(expr: str) -> ast.expr:
         msg = f"the condition could not be parsed: {exc}"
         raise VariantConditionError(msg) from exc
     try:
+        # Gate two: kinds and semantics, which the grammar does not constrain —
+        # a bare `var.debug` is derivable in pest and refused by ubCode's own
+        # DNF whitelist, exactly as it is here.
         _validate_boolean(text, tree.body)
-        # The lexical layer runs last so a form that is outside the grammar
-        # entirely gets the grammar's message rather than a spelling one.
-        _check_lexical(text, tree.body)
+        _mirror_string_literals(text, tree.body)
     except RecursionError as exc:
         # A deeply nested condition (`not not not …`) blows the walk's stack.
         # The module's discipline is that no input reaches an unhandled
