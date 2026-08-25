@@ -740,40 +740,193 @@ The one **safe** drop is an empty `files` list (`mounts.variant_rule_dropped`):
 a rule that named nothing has nothing to leak, so dropping it leaves the
 document set unchanged.
 
-### 12.5 The condition grammar
+### 12.5 The condition grammar — the two normative tables
 
-The grammar is a two-engine contract expressed as data, not as prose:
-`tests/fixtures/variant_condition_conformance.toml` is a vendored,
-byte-identical copy of ubCode's canonical corpus, with the source commit
-recorded in its header. **A third reader should implement against that file.**
+**This section is the grammar contract.** The vendored corpus
+(`tests/fixtures/variant_condition_conformance.toml`, a byte-identical copy of
+ubCode's canonical file with the source commit in its header) is the shared
+**test-vector set** — 46 conditions with their verdicts, useful for checking an
+implementation — but it is silent about most of the surface below, and a reader
+implementing only it lands on Python's semantics, which are not these.
 
-Accepted: comparisons (`== != < <= > >=`), membership (`in` / `not in`, with a
-list literal on the right), `is None` / `is not None`, `.startswith(…)` /
-`.endswith(…)`, `and` / `or` / `not` with parentheses, nested `var.*` access, and
-the literals `True` / `False`.
+Both tables are **mirrored on ubCode's shipped engine**: derived from
+`rust/ubc_query/src/py_expr.pest`, `py_expr.rs`, `filter.rs` and
+`rust/ubc_config/src/needs/variant_data.rs`, and confirmed by running every
+expression through that engine itself.
 
-Two narrowings, both configuration errors:
+They **deliberately depart from Python**, and that is the point. `var.debug == 0`
+is FALSE here because it is false there; Python's `False == 0` would have made
+it true and the two tools would have built different sites from one file,
+silently. ubCode's own `docs/source/usage/variants.rst` claims these semantics
+match Python's — measured, they do not; that is a defect in its documentation,
+named here rather than adopted. If the two engines ever move to Python
+semantics they move **together**, in the same release.
 
-- **the top level must be boolean.** A bare field (`var.debug`) is refused. So
-  is a bare `.upper()` / `.lower()`, which returns a string — but a bare
-  `.startswith(…)` / `.endswith(…)` is **accepted**, because it returns a
+#### Table 1 — the accept-set
+
+An expression is a boolean form:
+
+```text
+boolean := boolean ('and'|'or') boolean
+         | 'not' boolean
+         | '(' boolean ')'
+         | comparison
+         | 'True' | 'False'
+         | receiver '.' ('startswith'|'endswith') '(' string ')'
+```
+
+A comparison is exactly one of these seven rows. **Every row carries at least
+one receiver**, because the engine has no arm holding two literals — `True ==
+True` and `'a' == 'b'` are parse errors there, not design choices:
+
+| # | Left | Operator | Right |
+| --- | --- | --- | --- |
+| 1 | receiver | `==` `!=` | receiver \| scalar-literal |
+| 2 | scalar-literal | `==` `!=` | receiver |
+| 3 | receiver | `<` `>` `<=` `>=` | receiver \| number-literal |
+| 4 | number-literal | `<` `>` `<=` `>=` | receiver |
+| 5 | receiver | `in` `not in` | `[` scalar-literal, … `]` |
+| 6 | scalar-literal | `in` `not in` | receiver |
+| 7 | receiver | `is` `is not` | `None` |
+
+```text
+receiver       := 'var' ('.' name)+ ('.upper()' | '.lower()')?   -- ONE function
+scalar-literal := string | integer | float | 'True' | 'False' | 'None'
+number-literal := integer | float          -- NOT bool, None or string
+```
+
+Both integers and floats may carry a leading `-`. Consequences worth stating,
+because an AST-shaped reader gets each of them wrong:
+
+- a list literal is legal **only** as the right-hand side of `in` / `not in`;
+- `in` / `not in` never take a string or a field on the right;
+- a predicate call may not appear **inside** a comparison, though `.upper()`
+  may — an asymmetry an author will not guess;
+- an ordering operator takes only a number on the literal side;
+- a comparison with no receiver at all is refused;
+- exactly one transformer suffix: `var.name.upper().upper()` is refused.
+
+Two further narrowings, both configuration errors:
+
+- **the top level must be boolean.** A bare field (`var.debug`) is refused, and
+  so is a bare `.upper()` / `.lower()`, which returns a string — but a bare
+  `.startswith(…)` / `.endswith(…)` **is** accepted, because it returns a
   boolean. The rule is type-aware, and prose summaries of it (including
-  ubCode's own schema doc comment) are imprecise here. The corpus is the
-  contract.
+  ubCode's own schema doc comment) are imprecise here.
 - **every field reference must be rooted at `var`.** A prefix-less
   `edition == 'pro'` is refused, as is any other bare name. A TOML-spelled
   `true` / `false` is a *field name* to the parser and is refused with a message
   naming that mistake.
 
-A condition that cannot be **evaluated** — an unknown `var.*` key, a type
-mismatch — is reported (`mounts.variant_rule_unevaluable`) and the rule is
-**false**, so its files are excluded.
+#### Table 1b — the LEXICAL layer
 
-sphinx-mounts *interprets* the condition: `ast.parse`, a whitelist walk, then a
-second walk over the plain merged mapping. There is no `eval`, no `exec` and no
-namespace object anywhere in the extension. A second reader is free to evaluate
-instead, but then the whitelist's completeness is a security property rather
-than a correctness one.
+The accept-set above is necessary and **not sufficient**. Python's tokenizer
+normalises away spellings ubCode's lexer refuses outright, so a reader working
+from a parsed tree alone keeps finding new members of one class — and every
+member leaks: ubCode refuses, which makes the rule permanently false and
+EXCLUDES its files, while an AST-only reader evaluates and keeps them.
+
+| Rule | Refused | Accepted |
+| --- | --- | --- |
+| word operators (`and` `or` `in` `is` `not`) sit between `ws+` | `not(x)`, `x and(y)`, `)or(`, `in['a']`, `2and y`, `'net'in x` | `not (x)`, `x and (y)`, doubled spaces, tabs |
+| comparison operators sit between `ws*` | — | `var.count>=2`, `var.edition=='pro'` |
+| a `var.*` access admits no whitespace around `.` | `var . name`, `var. name`, `var.name .startswith('x')` | `var.name` |
+| a method call admits none inside its parentheses, and no trailing comma | `.upper( )`, `.upper ()`, `.startswith( 'x' )`, `.startswith('x',)` | `.upper()`, `.startswith('x')` |
+| list literals: no trailing comma, and there is no tuple form | `['a',]`, `['a' ,]`, `('a','b')`, `('a',)` | `[ 'a' , 'b' ]` |
+| numerals are decimal, with no base prefix, no `_`, and a leading digit | `0x2`, `0X2`, `0b10`, `0o2`, `2_0`, `.5`, `-0x2` | `2`, `-2`, `0`, `2.`, `2.5`, `2e1`, `2E1`, `2.5e-1` |
+| implicit string concatenation has no rule | `'Wid' 'get'` | `'Widget'` |
+
+String escapes are the one row handled by **mirroring rather than refusing**,
+because ubCode accepts them and merely reads a different string. Its decoder
+knows `\n \t \r \b \f \v \a \0 \\ \' \"` and leaves every other escape with its
+backslash attached, so `'a\x41b'` is six characters there and four in Python. A
+reader must decode the same way; refusing instead would be a divergence of its
+own.
+
+**A declared divergence in the fail-CLOSED direction.** ubCode's `ws` includes
+a newline, so a condition split across lines parses there; Python cannot parse
+a bare newline in an expression, so this reader refuses it. The build stops
+here and succeeds there — no leak, but a difference, recorded rather than
+discovered.
+
+#### Table 2 — the comparison semantics
+
+Values are lowered first
+(`rust/ubc_config/src/needs/variant_data.rs::variant_value_to_filter`):
+
+```text
+scalar  -> str | bool | int | float
+array   -> list[str] | list[bool] | list[int] | list[float]
+           (an EMPTY array lowers to an empty list of STRINGS)
+mapping -> bool(non-empty)          -- a map is compared by its TRUTHINESS
+```
+
+**Equality** (`filter.rs::value_matches_literal`); `!=` is its negation:
+
+| Left value | Right literal | Result |
+| --- | --- | --- |
+| str | str | `==` |
+| bool | bool | `==` |
+| int | int | `==` |
+| int | float | `float(v) == l` |
+| float | float | `==` |
+| float | int | `v == float(l)` |
+| **any other pair** | | **False** |
+
+So `(bool, int)` has no arm: `var.debug == 0` is **False** with `debug = false`,
+where Python says True — and its twin `var.debug != 0` is **True** where Python
+says False. These two change which documents a build contains.
+
+**Field vs field** converts the right value to a literal first, and a **list
+cannot be converted** — that RAISES. `var.tags == var.build.features` is an
+evaluation error, not `False`.
+
+**Ordering** (`filter.rs::value_compares_number`): the left value must be int or
+float, else it RAISES; a field on the right must be int or float, else it
+raises. `var.debug > 0` raises here and is `False` in Python.
+
+**Membership, `literal in receiver`** (`filter.rs::LiteralInVarField`):
+
+| Receiver | Literal | Result |
+| --- | --- | --- |
+| str | str | substring |
+| list[str] | str | contains |
+| list[bool] | bool | contains |
+| list[int] | int | contains |
+| list[int] | float | `any(float(i) == l)` |
+| list[float] | float | contains |
+| list[float] | int | `any(f == float(l))` |
+| a list, any other literal type | | **RAISES** |
+| bool \| int \| float (a mapping lowers to bool) | | **RAISES** |
+
+So `2 in var.tags` and `'debug' in var.build` are evaluation errors where
+Python returns a value.
+
+**Membership, `receiver in [literals]`** (`filter.rs::VarInLiteralList`):
+`any(…)` over the equality table above; a list receiver matches nothing and
+returns `False` rather than raising.
+
+**`is None` / `is not None`**: variant data can never hold a null, so a
+resolvable key is never `None`. An unknown key raises, as everywhere else.
+
+**`.upper()` / `.lower()` and the string predicates** require a `str` value and
+raise otherwise (`filter.rs::apply_function`).
+
+**Short-circuiting**: `and` / `or` evaluate left to right and an unreached
+operand's error never surfaces — measured on both engines, which agree.
+
+#### How this reader implements the tables
+
+sphinx-mounts *interprets*: `ast.parse`, a whitelist walk, a lexical pass over
+the raw text, then a second walk over the plain merged mapping. There is no
+`eval`, no `exec` and no namespace object anywhere in the extension. A second
+reader is free to evaluate instead, but then the whitelist's completeness is a
+security property rather than a correctness one — and it still owes the lexical
+layer, which an evaluator does not get for free either.
+
+A condition that cannot be **evaluated** — an unknown `var.*` key, or any of the
+raising cells above — is reported (`mounts.variant_rule_unevaluable`) and the
+rule is **false**, so its files are excluded.
 
 ### 12.6 The variant map, and the two anchors
 
