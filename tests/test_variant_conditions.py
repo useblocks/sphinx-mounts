@@ -144,21 +144,23 @@ def test_adversarial_forms_are_refused(expr: str) -> None:
 
 
 def test_a_type_mismatch_is_an_evaluation_error_not_a_grammar_error() -> None:
-    """Comparison semantics are Python's; a ``TypeError`` excludes.
+    """A wrongly-typed operand excludes rather than refusing the build.
 
     ``var.name < 1`` is perfectly well-formed and only the *data* makes it
     fail, so it belongs on the accept-plus-evaluation-error side of the line —
-    the same side an unknown key is on, and for the same reason.
+    the same side an unknown key is on, and for the same reason. The exact
+    behaviour is ubCode's, not Python's; see
+    ``test_variant_grammar_parity.py``.
     """
     validate("var.name < 1")
-    with pytest.raises(VariantEvalError, match="type mismatch"):
+    with pytest.raises(VariantEvalError, match="number comparison"):
         evaluate("var.name < 1", VARIANT_DATA)
 
 
 def test_a_string_method_on_a_non_string_is_an_evaluation_error() -> None:
     """``var.count.startswith('1')`` parses; the data is what refuses it."""
     validate("var.count.startswith('1')")
-    with pytest.raises(VariantEvalError, match="needs a string"):
+    with pytest.raises(VariantEvalError, match="string predicate"):
         evaluate("var.count.startswith('1')", VARIANT_DATA)
 
 
