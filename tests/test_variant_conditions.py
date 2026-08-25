@@ -41,7 +41,7 @@ CORPUS_PATH = Path(__file__).parent / "fixtures" / "variant_condition_conformanc
 EXPECTED_CASE_COUNT = 46
 
 #: Modules that must stay importable outside sphinx-mounts entirely.
-DEPENDENCY_FREE_MODULES = ("variants.py",)
+DEPENDENCY_FREE_MODULES = ("variants.py", "dialect.py")
 
 
 def _corpus() -> dict[str, Any]:
