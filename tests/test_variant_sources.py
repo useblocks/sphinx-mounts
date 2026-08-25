@@ -21,6 +21,7 @@ Four things are load-bearing enough to have their own sections below:
 
 from __future__ import annotations
 
+import gc
 from io import StringIO
 import json
 import logging as stdlib_logging
@@ -831,6 +832,65 @@ def test_a_second_build_in_one_process_keeps_its_own_warnings(make_app, tmp_path
     assert "hostgated.html" not in _pages(app_a)
     assert mount_warnings.VARIANT_EXCLUDED_CODE in app_a._status.getvalue()
     assert _attribution() == {}, "the filter comes off when A's build ends"
+
+    root_b = tmp_path / "b"
+    (root_b / "proj").mkdir(parents=True)
+    _write(
+        root_b / "proj" / "conf.py",
+        """
+        project = "b"
+        author = "tests"
+        extensions = ["sphinx_mounts"]
+        master_doc = "index"
+    """,
+    )
+    _write(
+        root_b / "proj" / "index.rst",
+        """
+        B
+        =
+
+        .. toctree::
+
+           hostgated
+    """,
+    )
+    app_b = _build(make_app, root_b / "proj")
+    warning = app_b._warning.getvalue()
+    assert "hostgated" in warning
+    assert "WARNING" in warning, "B's genuine broken reference must survive"
+    assert mount_warnings.VARIANT_EXCLUDED_CODE not in warning
+    assert app_b._warncount >= 1
+
+
+def test_an_application_that_never_builds_does_not_leak_its_filter(make_app, tmp_path):
+    """The leak per-application keying could not close.
+
+    Project A declares rules and is **constructed but never built**, so it
+    never reaches ``build-finished`` and its filter has no other way off.
+    Keying removal by owner left it attached; a ``weakref`` liveness sweep did
+    not help either, because a ``Sphinx`` application stays reachable from
+    process-global state and is never collected — measured, ``del`` plus an
+    explicit ``gc.collect()`` does not free it.
+
+    Project B has no ``ubproject.toml`` at all and an index naming a genuinely
+    missing document. Its warning must survive and must still count, or a
+    ``-W`` build that should fail passes for a reason in a project it has never
+    heard of.
+    """
+    a_toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir_a, _ = make_project(tmp_path / "a", toml=a_toml)
+    app_a = make_app(srcdir=confdir_a, freshenv=True)  # constructed, NOT built
+    assert app_a is not None
+    del app_a
+    gc.collect()
 
     root_b = tmp_path / "b"
     (root_b / "proj").mkdir(parents=True)

@@ -1325,13 +1325,13 @@ def _on_install_variant_filter(app: Sphinx) -> None:
     """
     state: _VariantState | None = getattr(app, _VARIANT_STATE_KEY, None)
     if state is None:
-        mount_warnings.remove_downgrade_filters(app)
+        mount_warnings.remove_downgrade_filters()
         return
     suffixes = tuple(app.project.source_suffix)
     excluded = _host_excluded_docnames(app, state, suffixes)
     excluded.update(_mount_excluded_docnames(state, suffixes))
     if not excluded:
-        mount_warnings.remove_downgrade_filters(app)
+        mount_warnings.remove_downgrade_filters()
         return
     _, names, degraded = mount_warnings.install_downgrade_filter(excluded, app)
     if degraded:
@@ -1351,9 +1351,14 @@ def _on_install_variant_filter(app: Sphinx) -> None:
     )
 
 
-def _on_remove_variant_filter(app: Sphinx, _exception: Exception | None) -> None:
-    """Detach this application's downgrade filter when its build ends."""
-    mount_warnings.remove_downgrade_filters(app)
+def _on_remove_variant_filter(_app: Sphinx, _exception: Exception | None) -> None:
+    """Detach the downgrade filter when this build ends.
+
+    Every filter comes off, not only this application's — the loggers are
+    process-global and a build is what owns them; see
+    :func:`sphinx_mounts.warnings.remove_downgrade_filters`.
+    """
+    mount_warnings.remove_downgrade_filters()
 
 
 def _host_excluded_docnames(

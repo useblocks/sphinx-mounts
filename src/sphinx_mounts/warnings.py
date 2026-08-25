@@ -170,7 +170,13 @@ class DowngradeFilter(stdlib_logging.Filter):
         return self.owner_id == id(owner)
 
     def orphaned(self) -> bool:
-        """Whether the installing application has been collected."""
+        """Whether the installing application has been collected.
+
+        Kept for diagnostics only. It is NOT a lifecycle signal: a ``Sphinx``
+        application stays reachable from process-global state, so this is
+        essentially always ``False`` even after the caller drops its reference
+        — which is why the lifecycle is "remove all, then install mine".
+        """
         return self._owner() is None
 
     def filter(self, record: stdlib_logging.LogRecord) -> bool:
@@ -270,28 +276,33 @@ def install_downgrade_filter(
 ) -> tuple[DowngradeFilter, tuple[str, ...], tuple[str, ...]]:
     """Attach a fresh :class:`DowngradeFilter` for ``owner``.
 
-    ``owner`` is the ``Sphinx`` application the attribution belongs to. Only
-    that application's own filter is replaced, plus any whose application has
-    since been collected — so a second application starting up cannot silently
-    take over, or discard, a live one's attribution.
+    ``owner`` is the ``Sphinx`` application the attribution belongs to; it is
+    recorded on the filter so a diagnostic can say whose it is.
+
+    **Every** existing filter is removed first, not only this owner's. The
+    loggers are process-global and the alternative was measured to leak: an
+    application that is CONSTRUCTED and never BUILT never reaches
+    ``build-finished``, so its filter has no other way off — and per-owner
+    keying left it attached to silence the next project's genuine warnings.
+    A liveness sweep by ``weakref`` does not help either, because a ``Sphinx``
+    application stays reachable from process-global state and is never
+    collected.
+
+    See :func:`remove_downgrade_filters` for what this does and does not
+    promise about concurrency.
 
     :return: ``(filter, logger names, names that fell back)``.
     """
     names, degraded = resolve_toctree_logger_names()
     installed = DowngradeFilter(excluded, names, owner)
+    remove_downgrade_filters()
     for name in names:
-        logger = stdlib_logging.getLogger(name)
-        for existing in list(logger.filters):
-            if isinstance(existing, DowngradeFilter) and (
-                existing.owned_by(owner) or existing.orphaned()
-            ):
-                logger.removeFilter(existing)
-        logger.addFilter(installed)
+        stdlib_logging.getLogger(name).addFilter(installed)
     return installed, names, degraded
 
 
-def remove_downgrade_filters(owner: object | None = None) -> None:
-    """Detach this application's :class:`DowngradeFilter` from the loggers.
+def remove_downgrade_filters(owner: object | None = None) -> None:  # noqa: ARG001
+    """Detach every :class:`DowngradeFilter` from the emitting loggers.
 
     The loggers are **process-global** while a ``Sphinx`` application is not,
     and that gap is a real one rather than a tidiness concern. Two things go
@@ -305,16 +316,22 @@ def remove_downgrade_filters(owner: object | None = None) -> None:
     * a rule-less application calling this on its way past used to strip a
       filter that a *live* application had installed.
 
-    Passing ``owner`` removes only that application's filter — plus any whose
-    application has been collected, so a long-lived process cannot accumulate
-    them. Passing nothing removes every one, which is what a test harness
-    wants and what a shutdown path can safely do.
+    ``owner`` is accepted for call-site clarity and is deliberately **not** used
+    to narrow what is removed. Per-owner removal was tried and leaked: an
+    application constructed but never built never reaches ``build-finished``,
+    so nothing ever took its filter off.
+
+    **Genuinely interleaved applications in one process are out of contract.**
+    Two `Sphinx` applications building at the same time share these
+    process-global loggers, and no keying inside a `logging.Filter` can
+    separate their records — the record carries no application. Sphinx is
+    single-threaded per build, so the reachable shapes are sequential ones, and
+    those are what this handles: whoever starts a build owns the loggers until
+    it finishes.
     """
     names, _ = resolve_toctree_logger_names()
     for name in dict.fromkeys((*names, *FALLBACK_LOGGER_NAMES)):
         logger = stdlib_logging.getLogger(name)
         for existing in list(logger.filters):
-            if not isinstance(existing, DowngradeFilter):
-                continue
-            if owner is None or existing.owned_by(owner) or existing.orphaned():
+            if isinstance(existing, DowngradeFilter):
                 logger.removeFilter(existing)

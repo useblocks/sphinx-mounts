@@ -139,26 +139,39 @@ def test_reinstalling_replaces_rather_than_stacks() -> None:
         assert installed[0]._excluded == {"other": "rule"}
 
 
-def test_a_second_application_does_not_replace_or_strip_the_first() -> None:
-    """Two applications, two filters, and neither one owns the other's.
+def test_installing_removes_every_earlier_filter() -> None:
+    """Installation is "remove all, then install mine", deliberately.
 
-    The loggers are process-global and a ``Sphinx`` application is not. Before
-    identity, a second application starting up either took over the first's
-    attribution set, or — if it had no rules of its own — stripped the live
-    one's filter entirely on its way past.
+    Per-owner removal was tried first and leaked. An application that is
+    CONSTRUCTED and never BUILT never reaches ``build-finished``, so its filter
+    has no other way off, and a ``weakref`` liveness sweep does not help: a
+    ``Sphinx`` application stays reachable from process-global state and is
+    never collected. So the next application to install evicts whatever is
+    there.
+
+    Genuinely interleaved applications are **out of contract** — two builds
+    running at once share these loggers and a record carries no application, so
+    nothing inside a ``logging.Filter`` could separate them. Sphinx is
+    single-threaded per build; the reachable shapes are sequential, and those
+    are what this covers.
     """
     first, second = _Owner(), _Owner()
     install_downgrade_filter(EXCLUDED, first)
     install_downgrade_filter({"other": "rule"}, second)
     logger = stdlib_logging.getLogger(RESOLVED_NAMES[0])
     installed = [f for f in logger.filters if isinstance(f, DowngradeFilter)]
-    assert len(installed) == 2
+    assert len(installed) == 1, "the earlier filter is evicted, not stacked"
+    assert installed[0].owned_by(second)
+    assert installed[0]._excluded == {"other": "rule"}
 
-    # A rule-less application removes ITS OWN filter and nothing else.
-    remove_downgrade_filters(second)
-    installed = [f for f in logger.filters if isinstance(f, DowngradeFilter)]
-    assert len(installed) == 1
-    assert installed[0].owned_by(first)
+
+def test_removal_takes_every_filter_off_whoever_installed_it() -> None:
+    """Stand-down is unconditional for the same reason installation is."""
+    install_downgrade_filter(EXCLUDED, _Owner())
+    remove_downgrade_filters(_Owner())
+    for name in RESOLVED_NAMES:
+        logger = stdlib_logging.getLogger(name)
+        assert not any(isinstance(f, DowngradeFilter) for f in logger.filters)
 
 
 def test_removal_detaches_from_every_logger() -> None:
