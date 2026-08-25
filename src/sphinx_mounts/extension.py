@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -637,9 +637,6 @@ class _GatedMount:
     gitignore: bool
     excludes_before: tuple[str, ...]
     excludes_after: tuple[str, ...]
-    #: Absolute path -> rule label, for a file-list mount, where the filtering
-    #: happens at fold time and needs no second walk.
-    dropped_files: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1081,11 +1078,16 @@ def _fold_into_mounts(
       every ``include`` is added before every ``exclude``, so an appended
       variant exclude beats any user ``include`` — which is exactly the
       "rules only narrow" semantics wanted.
-    * **file-list mode** has no walker to hand a pattern to, so the ``files``
-      array is filtered instead. A rule glob selects a listed file by its
-      **basename** (the anchor that works in a flat namespace, and the one a
-      separator-less pattern means anyway) or by its path relative to the TOML
-      directory when the pattern carries a separator.
+    * **file-list mode is NOT gated at all**, and that is parity rather than a
+      gap. ubCode cannot gate one either: a ``files`` mount's entries are
+      pushed straight into its result with no include or exclude consulted, and
+      a variant rule reaches its discovery only through ``extend_exclude``, so
+      **no rule can remove a file-list mount's document under any spelling
+      there** (``rust/ubc_config/src/resolved.rs``). Gating one here — by
+      basename, which is what this reader used to do — was a divergence in the
+      removes-more-here direction, and it is the one thing this key must never
+      be: two readers, two document sets, from one rule string. Use a directory
+      mount for a bundle that has to be gateable.
 
     ``config["mounts"]`` is reassigned at the end even though the entries were
     mutated in place, because it is the config *value* changing that makes a
@@ -1133,23 +1135,8 @@ def _fold_into_mount_entry(
             excludes_before=before,
             excludes_after=tuple(entry["exclude"]),
         )
-    files = entry.get("files")
-    if not isinstance(files, list):
-        return entry, None
-    kept, dropped = _filter_listed_files(files, excluding)
-    if not dropped:
-        return entry, None
-    entry["files"] = kept
-    return entry, _GatedMount(
-        index=index,
-        mount_at=mount_at,
-        dir=None,
-        include=(),
-        gitignore=True,
-        excludes_before=(),
-        excludes_after=(),
-        dropped_files=dropped,
-    )
+    # A file-list mount is left completely alone; see `_fold_into_mounts`.
+    return entry, None
 
 
 def _fold_into_mount_config(
@@ -1178,48 +1165,8 @@ def _fold_into_mount_config(
             excludes_before=mount.exclude,
             excludes_after=updated.exclude,
         )
-    if mount.files is None:
-        return mount, None
-    kept, dropped = _filter_listed_files([str(f) for f in mount.files], excluding)
-    if not dropped:
-        return mount, None
-    return replace(mount, files=tuple(Path(f) for f in kept)), _GatedMount(
-        index=index,
-        mount_at=mount.mount_at,
-        dir=None,
-        include=(),
-        gitignore=True,
-        excludes_before=(),
-        excludes_after=(),
-        dropped_files=dropped,
-    )
-
-
-def _filter_listed_files(
-    files: list[Any], excluding: tuple[VariantRule, ...]
-) -> tuple[list[Any], dict[str, str]]:
-    """Split a ``files`` array into what survives and what a rule removed."""
-    kept: list[Any] = []
-    dropped: dict[str, str] = {}
-    for raw in files:
-        if not isinstance(raw, str):
-            kept.append(raw)
-            continue
-        name = Path(raw).name
-        label = next(
-            (
-                rule.label
-                for rule in excluding
-                for pattern in rule.files
-                if dialect.matches(pattern, name)
-            ),
-            None,
-        )
-        if label is None:
-            kept.append(raw)
-        else:
-            dropped[raw] = label
-    return kept, dropped
+    # A file-list mount is left completely alone; see `_fold_into_mounts`.
+    return mount, None
 
 
 # ---------------------------------------------------------------------------
@@ -1310,15 +1257,13 @@ def _host_excluded_docnames(
 def _mount_excluded_docnames(
     state: _VariantState, suffixes: tuple[str, ...]
 ) -> dict[str, str]:
-    """Docnames the mount arm removed, each mapped to the rule that removed it."""
+    """Docnames the mount arm removed, each mapped to the rule that removed it.
+
+    Directory mounts only: a file-list mount is never narrowed by a rule (see
+    :func:`_fold_into_mounts`), so it has nothing to attribute.
+    """
     excluded: dict[str, str] = {}
     for gated in state.gated_mounts:
-        if gated.dropped_files:
-            for raw, label in gated.dropped_files.items():
-                docname = _docname_for(Path(raw).name, suffixes)
-                if docname is not None:
-                    excluded[_join_mount(gated.mount_at, docname)] = label
-            continue
         if gated.dir is None or not gated.dir.is_dir():
             continue
         before = _walked_relatives(gated, gated.excludes_before)

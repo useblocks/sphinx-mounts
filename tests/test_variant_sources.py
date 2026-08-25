@@ -403,17 +403,64 @@ def test_the_stale_output_caveat_is_real(make_app, tmp_path):
     )
 
 
-def test_a_file_list_mount_is_gated_too(make_app, tmp_path):
-    """File-list mode has no walker, so the ``files`` array is filtered instead.
+@pytest.mark.parametrize(
+    "pattern",
+    ["binternal.rst", "bundle/binternal.rst", "bundle/**", "*/binternal.rst"],
+    ids=["basename", "path", "tree", "wildcard-dir"],
+)
+def test_a_file_list_mount_is_not_gated_by_any_rule_spelling(
+    make_app, tmp_path, pattern: str
+):
+    """Parity: neither reader gates a file-list mount, under any spelling.
 
-    Two mount modes, two code paths — the same rule the rest of this extension
-    follows. A reader that implemented only the directory arm would leave a
-    file-list bundle completely un-gated, which is a content leak rather than a
-    missing feature.
+    ubCode cannot gate one — a ``files`` mount's entries are pushed straight
+    into its result with no include or exclude consulted, and a variant rule
+    reaches its discovery only through ``extend_exclude``
+    (``rust/ubc_config/src/resolved.rs``). This reader used to gate one by
+    basename, which put a file in ubCode's build and not in Sphinx's from one
+    rule string — a divergence in the removes-more-here direction, and exactly
+    what this key must never do.
+
+    So the arm is gone rather than completed, and this test is what keeps it
+    gone. Every spelling is exercised because "not gated" has to hold for the
+    path forms too, not only the basename one that used to fire.
+    """
+    toml = f"""
+    [[source.mounts]]
+    files = ["{{bundle}}/index.rst", "{{bundle}}/binternal.rst"]
+    mount_at = "mnt"
+
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["{pattern}"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml)
+    app = _build(make_app, confdir)
+    pages = _pages(app)
+    assert "mnt/index.html" in pages
+    assert "mnt/binternal.html" in pages, (
+        "a file-list mount must survive every rule spelling, because ubCode's "
+        "cannot be gated at all"
+    )
+
+
+def test_a_directory_mount_beside_a_file_list_mount_is_still_gated(make_app, tmp_path):
+    """The limitation is per mount MODE, not per project.
+
+    Dropping the file-list arm must not quietly stop gating the directory
+    mounts in the same project — which is what a coarser "skip mounts when any
+    is a file list" fix would have done.
     """
     toml = """
     [[source.mounts]]
-    files = ["{bundle}/index.rst", "{bundle}/binternal.rst"]
+    files = ["{bundle}/index.rst"]
+    mount_at = "flat"
+
+    [[source.mounts]]
+    dir = "{bundle}"
     mount_at = "mnt"
 
     [[source.variant_sources]]
@@ -426,6 +473,7 @@ def test_a_file_list_mount_is_gated_too(make_app, tmp_path):
     confdir, _ = make_project(tmp_path, toml=toml)
     app = _build(make_app, confdir)
     pages = _pages(app)
+    assert "flat/index.html" in pages
     assert "mnt/index.html" in pages
     assert "mnt/binternal.html" not in pages
 
@@ -453,6 +501,41 @@ def test_a_conf_py_mount_is_gated_too(make_app, tmp_path):
     app = _build(make_app, confdir)
     assert "mnt/index.html" in _pages(app)
     assert "mnt/binternal.html" not in _pages(app)
+
+
+def test_a_conf_py_mountconfig_instance_is_gated_too(make_app, tmp_path):
+    """The `conf.py` dataclass path, which no test used to reach.
+
+    ``parse_mounts`` documents ``mounts`` as "a sequence of mappings **or**
+    ``MountConfig`` instances", and the fold has a dedicated branch for the
+    second shape that a plain dict never exercises. Both mount modes are
+    asserted: a directory mount gated, a file-list mount NOT gated — the same
+    parity the TOML path keeps.
+    """
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["binternal.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, bundle = make_project(tmp_path, toml=toml)
+    conf = confdir / "conf.py"
+    conf.write_text(
+        conf.read_text(encoding="utf-8")
+        + "\nfrom pathlib import Path\n"
+        + "from sphinx_mounts.config import MountConfig\n"
+        + f"mounts = [MountConfig(dir=Path(r'{bundle}'), mount_at='mnt'),\n"
+        + f"          MountConfig(files=(Path(r'{bundle}/binternal.rst'),),"
+        + " mount_at='flat')]\n",
+        encoding="utf-8",
+    )
+    app = _build(make_app, confdir)
+    pages = _pages(app)
+    assert "mnt/index.html" in pages
+    assert "mnt/binternal.html" not in pages, "the directory mount is gated"
+    assert "flat/binternal.html" in pages, "the file-list mount is not"
 
 
 # ---------------------------------------------------------------------------

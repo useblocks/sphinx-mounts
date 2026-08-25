@@ -621,6 +621,17 @@ is an AND over the conditions of all rules matching that file. The semantics are
 **order-independent** and rules only ever **narrow**, so an ordered `else` could
 be added later without redefining any configuration written today.
 
+**Variant rules never gate a file-list mount** (§5.2), in either reader.
+ubCode's `files`-mount entries are pushed straight into its result with no
+include or exclude consulted, and a variant rule reaches its discovery only by
+being folded into `[source] extend_exclude` — so no rule can remove such a
+document there under any spelling, and this reader matches rather than
+diverging. A second implementation must reproduce the limitation or declare
+that it does not; gating one is a "one rule string, two document sets"
+divergence in the removes-more-here direction. Neither reader reports it per
+build, because a diagnostic only one of them emits is itself a difference.
+A bundle that has to be gateable is declared as a `dir` mount.
+
 Relative to a mount's own `include` / `exclude` (§5.3), a variant exclusion is
 **appended after** every `exclude` the user wrote. The override list is
 last-match-wins and all `include`s are added before all `exclude`s, so §5.3's

@@ -1203,6 +1203,18 @@ consequences are worth knowing before writing a rule.
 opposite of the intuition the rule above creates. ``pro/**`` gates nothing
 unless ``pro/`` sits at the source root.
 
+.. note::
+
+   **Variant rules do not gate a file-list mount** — one declared with
+   ``files = [...]`` rather than ``dir`` — in *either* reader, under any rule
+   spelling. A file-list mount's entries are an explicit request for named
+   files and bypass pattern matching entirely, so there is nothing for a rule
+   to narrow. Use a **directory mount** for a bundle that has to be gateable.
+
+   It is stated here rather than reported per build because ubCode is silent
+   about it too, and a diagnostic only one reader emits is itself a difference
+   between the two.
+
 Four spellings are **refused**, and each refusal fails the whole
 configuration rather than skipping its rule:
 
