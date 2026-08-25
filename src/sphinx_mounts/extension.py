@@ -62,6 +62,11 @@ _VARIANT_STATE_KEY = "_sphinx_mounts_variant_state"
 #: reader.
 _TOML_SETTING_KEY = "_sphinx_mounts_toml_setting"
 
+#: Application attribute holding ``(state, attribution)`` so a second build of
+#: the same application reuses the walk rather than repeating it. Keyed on the
+#: state object's identity — see :func:`_on_install_variant_filter`.
+_VARIANT_ATTRIBUTION_KEY = "_sphinx_mounts_variant_attribution"
+
 #: Name of the :class:`~sphinx.environment.BuildEnvironment` attribute holding
 #: the previous build's toctree-wiring signature.
 #:
@@ -1342,13 +1347,22 @@ def _fold_into_mount_config(
 # ---------------------------------------------------------------------------
 
 
-def _on_install_variant_filter(app: Sphinx) -> None:
+def _on_install_variant_filter(app: Sphinx, _env: Any, _docnames: list[str]) -> None:
     """Work out what the rules removed, and hook the toctree downgrade.
 
-    Runs at ``builder-inited``, after ``app.project`` exists, because the
-    docname derivation needs the project's registered source suffixes — and
-    because the walk it costs should not happen for a project whose rules all
-    hold, which is decided at config time.
+    Runs at ``env-before-read-docs``, which fires **once per build** — after
+    ``app.builder`` and ``app.project`` exist (the docname derivation needs the
+    builder's asset paths and the project's registered source suffixes) and
+    before any document is read, so before any toctree warning can be emitted.
+
+    Per BUILD, not per application, and that distinction is the whole point.
+    ``builder-inited`` fires once per *construction*, so an application built
+    twice through the public ``Sphinx.build()`` API — which exists precisely
+    for that — installed on its first build and ran its second unfiltered: a
+    correctly configured variant project emitted its variant-excluded toctree
+    warning un-downgraded and failed ``-W`` on rebuild. The module's own rule
+    is "whoever starts a build owns the loggers until it finishes"; this is
+    where that sentence is implemented.
 
     **This is the one new IO**, and it is bounded: one extra pass over the
     source directory plus one per narrowed mount, only for a project that
@@ -1357,14 +1371,27 @@ def _on_install_variant_filter(app: Sphinx) -> None:
     a file that was never written — which is the property the feature wants,
     and also why the downgrade has to be *told* which documents a variant
     removed rather than inferring it.
+
+    The result is **reused** across builds of one application rather than
+    recomputed. That is safe because the attribution is a pure function of the
+    fold's state, and the fold runs at ``config-inited``: a second
+    ``app.build()`` in the same process cannot have re-read ``conf.py`` or the
+    TOML, so the state object is identical and so is the answer. A changed
+    configuration means a new application, which means a new state object,
+    which the identity check below notices.
     """
     state: _VariantState | None = getattr(app, _VARIANT_STATE_KEY, None)
     if state is None:
         mount_warnings.remove_downgrade_filters()
         return
-    suffixes = tuple(app.project.source_suffix)
-    excluded = _host_excluded_docnames(app, state, suffixes)
-    excluded.update(_mount_excluded_docnames(state, suffixes))
+    cached = getattr(app, _VARIANT_ATTRIBUTION_KEY, None)
+    if cached is not None and cached[0] is state:
+        excluded = cached[1]
+    else:
+        suffixes = tuple(app.project.source_suffix)
+        excluded = _host_excluded_docnames(app, state, suffixes)
+        excluded.update(_mount_excluded_docnames(state, suffixes))
+        setattr(app, _VARIANT_ATTRIBUTION_KEY, (state, excluded))
     if not excluded:
         mount_warnings.remove_downgrade_filters()
         return
@@ -1570,7 +1597,11 @@ def setup(app: Sphinx) -> dict[str, Any]:
     app.connect("builder-inited", _on_builder_inited)
     # After ``_on_builder_inited``, because the docname derivation reads the
     # project's registered source suffixes.
-    app.connect("builder-inited", _on_install_variant_filter, priority=600)
+    # Per BUILD, not per construction: `Sphinx.build()` may be called more
+    # than once on one application, and each of those builds needs the filter.
+    # `env-before-read-docs` fires every build, after the builder exists and
+    # before any document is read.
+    app.connect("env-before-read-docs", _on_install_variant_filter)
     # The emitting loggers are process-global and this application is not, so
     # the filter comes off when the build ends. Without it, the NEXT build in
     # the same process — sphinx-autobuild, a multi-project script, a test

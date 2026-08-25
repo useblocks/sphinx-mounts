@@ -918,6 +918,39 @@ def test_a_second_build_in_one_process_keeps_its_own_warnings(make_app, tmp_path
     assert app_b._warncount >= 1
 
 
+def test_a_second_build_of_one_application_still_downgrades(make_app, tmp_path):
+    """``Sphinx.build()`` may be called more than once, and each build needs it.
+
+    The install used to sit on ``builder-inited``, which fires once per
+    application *construction*. So the first build of an application was
+    protected and every later one ran unfiltered: a correctly configured
+    variant project emitted its variant-excluded toctree warning
+    un-downgraded and returned a failing status under ``-W`` on rebuild.
+
+    ``Sphinx.build(force_all=…)`` exists precisely for repeated builds, so this
+    is in-contract usage — not the interleaved-applications shape the module
+    declares out of contract.
+    """
+    confdir, _ = make_project(tmp_path, toml=base_toml("basic"))
+    app = make_app(srcdir=confdir, freshenv=True, warningiserror=True)
+    app.build()
+    first = app._warning.getvalue()
+    assert "WARNING" not in first
+    assert app.statuscode == 0
+
+    app.build(force_all=True)
+    second = app._warning.getvalue()
+    assert "WARNING" not in second, (
+        "the second build must downgrade too; it used to emit "
+        "`toctree contains reference to excluded document` un-downgraded"
+    )
+    assert "toctree contains reference" not in second
+    assert app.statuscode == 0
+    assert app._status.getvalue().count(mount_warnings.VARIANT_EXCLUDED_CODE) >= 6, (
+        "both builds reported the downgrade"
+    )
+
+
 def test_an_application_that_never_builds_does_not_leak_its_filter(make_app, tmp_path):
     """The leak per-application keying could not close.
 
