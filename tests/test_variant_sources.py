@@ -1349,11 +1349,18 @@ NEEDS_STUB = """
 def setup(app):
     app.add_config_value("needs_variant_data", {inline}, "env")
     app.add_config_value("needs_variant_data_file", {file_ref}, "env")
+    app.add_config_value("needs_from_toml", {from_toml}, "env")
     return {{"parallel_read_safe": True, "parallel_write_safe": True}}
 """
 
 
-def _stub_conf(confdir: Path, module: str, inline: str, file_ref: str) -> None:
+def _stub_conf(
+    confdir: Path,
+    module: str,
+    inline: str,
+    file_ref: str,
+    from_toml: str = "None",
+) -> None:
     """Register the two sphinx-needs confvals without sphinx-needs.
 
     Simulating the confvals directly is what makes all three cells of the
@@ -1367,7 +1374,8 @@ def _stub_conf(confdir: Path, module: str, inline: str, file_ref: str) -> None:
     second test would then pass or fail for the wrong reason.
     """
     _write(
-        confdir / f"{module}.py", NEEDS_STUB.format(inline=inline, file_ref=file_ref)
+        confdir / f"{module}.py",
+        NEEDS_STUB.format(inline=inline, file_ref=file_ref, from_toml=from_toml),
     )
     conf = confdir / "conf.py"
     conf.write_text(
@@ -1521,6 +1529,80 @@ def test_a_mispointed_sphinx_needs_is_refused(make_app, tmp_path):
         _build(make_app, confdir)
     message = str(excinfo.value)
     assert "needs_from_toml" in message, "the one-line fix is named"
+    assert "variant_data_unreadable" in message
+
+
+@pytest.mark.parametrize(
+    ("toml_tail", "stub_file_ref"),
+    [
+        ("[needs.variant_data]\n", "None"),
+        ('[needs]\nvariant_data_file = "v.json"\n', "None"),
+    ],
+    ids=["empty-inline-table", "empty-data-file"],
+)
+def test_a_correctly_pointed_project_with_empty_data_is_not_refused(
+    make_app, tmp_path, toml_tail: str, stub_file_ref: str
+):
+    """The mispointing guard's reachable false positive.
+
+    The conjunct that matters is not "the map is empty" but "the map is empty
+    AND sphinx-needs is not reading this file". Without it, a project that had
+    already done exactly what the message advises — ``needs_from_toml`` set to
+    this very file — was hard-errored for having legitimately empty data: an
+    empty ``[needs.variant_data]`` placeholder, or a base-variant
+    ``variant_data_file`` of ``{}``. Both are ordinary, and the message named a
+    fix the project's ``conf.py`` already contained.
+    """
+    toml = (
+        """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    """
+        + toml_tail
+    )
+    confdir, _ = make_project(tmp_path, toml=toml)
+    (confdir / "v.json").write_text("{}", encoding="utf-8")
+    _stub_conf(
+        confdir,
+        "needs_stub_pointed",
+        inline="{}",
+        file_ref=stub_file_ref,
+        from_toml='"ubproject.toml"',
+    )
+    app = _build(make_app, confdir)
+    # Empty data is not a configuration error; the rule simply cannot be
+    # evaluated, which is the ordinary warn-and-exclude path.
+    assert "mounts.variant_rule_unevaluable" in app._warning.getvalue()
+    assert "hostgated.html" not in _pages(app)
+
+
+def test_a_sphinx_needs_pointed_at_a_different_file_is_still_refused(
+    make_app, tmp_path
+):
+    """The other half of the same conjunct, and the message says which file."""
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml)
+    (confdir / "other.toml").write_text("", encoding="utf-8")
+    _stub_conf(
+        confdir,
+        "needs_stub_elsewhere",
+        inline="{}",
+        file_ref="None",
+        from_toml='"other.toml"',
+    )
+    with pytest.raises(Exception) as excinfo:
+        _build(make_app, confdir)
+    message = str(excinfo.value)
+    assert "other.toml" in message, "the message names where it IS reading"
     assert "variant_data_unreadable" in message
 
 

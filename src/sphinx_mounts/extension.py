@@ -979,22 +979,47 @@ def _resolve_variant_map(
             f"report this. [mounts.variant_data_unreadable]"
         )
         raise VariantRuleError(msg) from exc
-    _guard_mispointed_needs(spec, present=present, resolved=resolved)
+    _guard_mispointed_needs(app, config, spec, present=present, resolved=resolved)
     return resolved
 
 
+def _needs_toml_pointer(app: Sphinx, config: Config) -> Path | None:
+    """Where sphinx-needs' own ``needs_from_toml`` points, resolved.
+
+    ``None`` when the confval is unset or switched off. Relative values are
+    anchored at ``confdir``, which is how sphinx-needs reads it.
+    """
+    pointer = getattr(config, "needs_from_toml", None)
+    if not pointer or not isinstance(pointer, str):
+        return None
+    candidate = Path(pointer)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (Path(app.confdir) / candidate).resolve()
+
+
 def _guard_mispointed_needs(
-    spec: VariantSourcesConfig, *, present: bool, resolved: dict[str, Any]
+    app: Sphinx,
+    config: Config,
+    spec: VariantSourcesConfig,
+    *,
+    present: bool,
+    resolved: dict[str, Any],
 ) -> None:
     """Refuse a project whose variant data is declared but never read.
 
     The conjunction is deliberately narrow, and every conjunct is statically
     knowable at this point: rules are declared, sphinx-needs is **present** (so
     its resolved map is what this reader must agree with), the TOML **declares**
-    variant data, and that map came out **empty**. There is only one way to be
-    in all four states at once — sphinx-needs was never pointed at this file —
-    and the consequence is that every rule reports an unknown key and excludes,
-    so the project silently loses every gated file.
+    variant data, that map came out **empty**, and sphinx-needs' own
+    ``needs_from_toml`` does **not** point at this file.
+
+    The last conjunct is the one that makes the guard safe to fire. Without it
+    the guard read "the map is empty" and refused a correctly wired project
+    whose data legitimately *is* empty — an empty ``[needs.variant_data]``
+    placeholder, or a base-variant ``variant_data_file`` of ``{}`` — and told
+    it to apply a fix its ``conf.py`` already contained. A hard error whose
+    message names no remedy is the worst shape a fail-closed refusal can take.
 
     It used to ride a *suppressible* ``mounts.variant_rule_unevaluable``
     warning per rule. That contradicts this key's own rule, argued in three
@@ -1004,17 +1029,27 @@ def _guard_mispointed_needs(
     with it set the loss was completely silent.
 
     A project that legitimately supplies the map from ``conf.py`` or ``-D``
-    cannot reach this: its resolved map is not empty.
+    cannot reach this either: its resolved map is not empty.
     """
     declares = spec.variant_data is not None or spec.variant_data_file is not None
     if not (present and declares and not resolved):
         return
+    pointer = _needs_toml_pointer(app, config)
+    if pointer == spec.toml_path:
+        # Correctly wired, and the data is simply empty. Not this guard's
+        # business — the per-rule warn-and-exclude reports it instead.
+        return
+    where = (
+        f"sphinx-needs is reading `{pointer}` instead"
+        if pointer is not None
+        else "sphinx-needs was never pointed at it"
+    )
     msg = (
         f"sphinx-mounts: `{spec.toml_path}` declares `[needs] variant_data` "
-        f"and `[[source.variant_sources]]`, but sphinx-needs resolved an EMPTY "
-        f"variant map — so it was never pointed at this file, and every rule "
-        f"would report an unknown key and exclude its files. The whole gated "
-        f"document set would silently disappear.\n"
+        f"and `[[source.variant_sources]]`, but {where}, so it resolved an "
+        f"EMPTY variant map. Every rule would report an unknown key and "
+        f"exclude its files, and the whole gated document set would silently "
+        f"disappear.\n"
         f"Point sphinx-needs at the same file, in conf.py:\n"
         f'    needs_from_toml = "{spec.toml_path.name}"\n'
         f"This reader deliberately takes the map FROM sphinx-needs whenever it "
