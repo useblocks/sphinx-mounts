@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -10,26 +12,54 @@ from sphinx import addnodes
 from sphinx.application import Sphinx
 from sphinx.config import Config
 from sphinx.errors import ExtensionError
+from sphinx.project import EXCLUDE_PATHS
 from sphinx.util import logging
+from sphinx.util.matching import get_matching_files, patmatch
 
-from sphinx_mounts import __version__
+from sphinx_mounts import __version__, dialect
+from sphinx_mounts import warnings as mount_warnings
 from sphinx_mounts.config import (
     MountConfig,
+    TomlConfigError,
+    VariantRule,
+    VariantRuleError,
+    VariantSourcesConfig,
     load_mounts_from_toml,
+    load_variant_sources_from_toml,
     mount_label,
     parse_mounts,
 )
 from sphinx_mounts.logging import log_warning
 from sphinx_mounts.mounter import (
     DocRoot,
+    _build_walker,
     _is_within_any,
+    _join_mount,
+    _match_suffix,
     _MountAwareProject,
     install_mount_aware_project,
+)
+from sphinx_mounts.variants import (
+    VariantConditionError,
+    VariantDataError,
+    VariantEvalError,
+    interpret,
+    resolve_variant_data,
+    validate,
 )
 
 logger = logging.getLogger(__name__)
 
 _CACHED_KEY = "_sphinx_mounts_parsed"
+
+#: Application attribute holding what the variant reader decided, for the
+#: ``builder-inited`` half to act on. See :class:`_VariantState`.
+_VARIANT_STATE_KEY = "_sphinx_mounts_variant_state"
+
+#: Application attribute caching the resolved TOML path setting, so the
+#: deprecation warning for ``mounts_from_toml`` fires once rather than once per
+#: reader.
+_TOML_SETTING_KEY = "_sphinx_mounts_toml_setting"
 
 #: Name of the :class:`~sphinx.environment.BuildEnvironment` attribute holding
 #: the previous build's toctree-wiring signature.
@@ -64,7 +94,7 @@ def _on_load_toml(app: Sphinx, config: Config) -> None:
     array at all, ``config.mounts`` is left untouched and any legacy
     conf.py-style value is used instead.
     """
-    toml_setting = getattr(config, "mounts_from_toml", None)
+    toml_setting = _resolve_toml_setting(app, config)
     if not toml_setting:
         return
     toml_path = (Path(app.confdir) / toml_setting).resolve()
@@ -524,9 +554,832 @@ def _attach_to_first_section(
     doctree.append(toctree_node)
 
 
+# ---------------------------------------------------------------------------
+# `[[source.variant_sources]]` — the reader, the fold, and the attribution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_toml_setting(app: Sphinx, config: Config) -> str | None:
+    """Decide which TOML file this extension reads, honouring both confvals.
+
+    ``sources_from_toml`` is the current name. ``mounts_from_toml`` is
+    deprecated-but-honoured, following the same warn-while-honouring pattern
+    the ``[[mounts]]`` -> ``[[source.mounts]]`` migration used
+    (``mapping-contract.md`` §1 rule 1a): a reader that honoured only the new
+    name would describe a different project from one that honoured only the
+    old, and warning while still reading the old spelling is what keeps them
+    agreeing during the migration.
+
+    The rename exists because the old name became a lie the moment this file
+    stopped being only about mounts — and because a project with **no mounts**
+    can now install sphinx-mounts purely for variant narrowing, which should
+    not require setting a confval called *mounts*``_from_toml``.
+
+    Setting both to different values is a hard error rather than a precedence
+    puzzle. Setting either to ``None`` disables **everything** this extension
+    reads from TOML — mounts and variant rules alike, so the coupling is named
+    rather than discovered.
+
+    The decision is cached on the application, so the deprecation warning fires
+    once per build rather than once per reader.
+    """
+    cached = getattr(app, _TOML_SETTING_KEY, _UNSET)
+    if cached is not _UNSET:
+        return cached  # type: ignore[return-value]
+    new_value = getattr(config, "sources_from_toml", DEFAULT_TOML_FILENAME)
+    old_value = getattr(config, "mounts_from_toml", DEFAULT_TOML_FILENAME)
+    new_explicit = new_value != DEFAULT_TOML_FILENAME
+    old_explicit = old_value != DEFAULT_TOML_FILENAME
+    if new_explicit and old_explicit and new_value != old_value:
+        msg = (
+            f"sphinx-mounts: `sources_from_toml` is set to {new_value!r} and "
+            f"the deprecated `mounts_from_toml` to {old_value!r}. Keep exactly "
+            f"one — picking a winner would make the file this extension reads "
+            f"depend on a precedence rule nobody reading conf.py can see. "
+            f"`sources_from_toml` is the current spelling."
+        )
+        raise TomlConfigError(msg)
+    setting = new_value
+    if old_explicit and not new_explicit:
+        setting = old_value
+        msg = (
+            "sphinx-mounts: `mounts_from_toml` is deprecated; rename it to "
+            "`sources_from_toml`. Nothing else changes — the same file is "
+            "read, for the same keys. The name was renamed because this "
+            "extension now also reads `[[source.variant_sources]]` out of it, "
+            "and a project with no mounts at all can use that. Note that "
+            "setting it to None disables everything read from the TOML file, "
+            "variant rules included. Suppress with suppress_warnings = "
+            '["mounts.deprecated_confval"] if you cannot migrate yet.'
+        )
+        log_warning(logger, msg, "deprecated_confval")
+    setattr(app, _TOML_SETTING_KEY, setting)
+    return setting
+
+
+class _Unset:
+    """Sentinel distinguishing "not computed yet" from a computed ``None``."""
+
+
+_UNSET = _Unset()
+
+
+@dataclass(frozen=True, slots=True)
+class _GatedMount:
+    """A mount whose file set a variant rule narrowed, and how.
+
+    Kept so ``builder-inited`` can walk the mount **as it would have been**
+    and diff, which is the only way to learn which docnames a rule removed: an
+    excluded file is pruned at the walk, so nothing downstream can tell it from
+    a file that was never written. That is the property the feature wants, and
+    also why the attribution has to be computed rather than inferred.
+    """
+
+    index: int
+    mount_at: str | None
+    dir: Path | None
+    include: tuple[str, ...]
+    gitignore: bool
+    excludes_before: tuple[str, ...]
+    excludes_after: tuple[str, ...]
+    #: Absolute path -> rule label, for a file-list mount, where the filtering
+    #: happens at fold time and needs no second walk.
+    dropped_files: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _VariantState:
+    """What the config-time reader decided, for the build-time half to use."""
+
+    #: ``(rule label, translated exclude_patterns)`` for every FALSE rule.
+    host_patterns: tuple[tuple[str, tuple[str, ...]], ...]
+    #: ``config.exclude_patterns`` as it was *before* the fold.
+    base_exclude_patterns: tuple[str, ...]
+    #: Every mount a rule narrowed.
+    gated_mounts: tuple[_GatedMount, ...]
+    #: ``(rule label, authored globs)`` for every FALSE rule, for attributing a
+    #: removed mounted file back to the pattern the author can edit.
+    false_rules: tuple[tuple[str, tuple[str, ...]], ...]
+
+
+def _on_load_variants(app: Sphinx, config: Config) -> None:
+    """Read ``[[source.variant_sources]]`` and fold its verdict into config VALUES.
+
+    Runs at ``config-inited`` priority **450**, the only slot that satisfies
+    all three constraints, every one of them measured:
+
+    * **> 11** — sphinx-needs loads its TOML at priority 10 and (from the
+      release after 8.3.1) resolves the variant map at 11, so the merged map is
+      available, or provably absent and the fallback runs;
+    * **> 400** — :func:`_on_load_toml` has put the raw mount tables into
+      ``config.mounts``, so there is something to fold into;
+    * **< 500** — :func:`_on_config_inited` has not yet parsed them into
+      :class:`~sphinx_mounts.config.MountConfig` s, so the fold is invisible to
+      everything downstream.
+
+    **The verdict is folded into config VALUES, not applied later.** Host-arm
+    patterns are appended to ``config.exclude_patterns``; mount-arm patterns are
+    appended to each raw mount table's ``exclude`` (or filter its ``files``),
+    and ``config["mounts"]`` is reassigned so the value really changes. Both
+    confvals are ``rebuild="env"``, so a gating flip is a config change Sphinx
+    already knows how to converge — it re-reads every document, in both
+    directions, on the build where the flip happened. A reader that gated
+    without touching a config value leaves both values byte-identical across a
+    flip and needs an invalidation story of its own.
+
+    Order matters and is the same order ubCode uses:
+
+    1. the glob-dialect refusals and the layout guard, which are
+       variant-**independent** — a pattern this key cannot interpret, or a
+       layout no pattern can be anchored in, is unusable in every variant;
+    2. the variant map;
+    3. condition validation (hard) and evaluation (warn-and-exclude);
+    4. the root-document guard, which is variant-**dependent** — a rule
+       matching the root document is perfectly legal while its condition holds;
+    5. the two folds.
+    """
+    setattr(app, _VARIANT_STATE_KEY, None)
+    setting = _resolve_toml_setting(app, config)
+    if not setting:
+        return
+    toml_path = (Path(app.confdir) / setting).resolve()
+    spec = load_variant_sources_from_toml(toml_path)
+    if spec is None or not spec.rules:
+        return
+
+    rules = _usable_rules(spec)
+    if not rules:
+        return
+    _refuse_glob_dialects(rules, toml_path)
+    _guard_layout(app, config, spec, rules)
+
+    variant_data = _resolve_variant_map(app, config, spec)
+    if variant_data is None:
+        # sphinx-needs owns the failure and will report it; see
+        # `_resolve_variant_map`.
+        return
+
+    excluding = _excluding_rules(rules, variant_data)
+    if not excluding:
+        logger.info(
+            "sphinx-mounts: every `variant_sources` rule holds for this "
+            "variant; the document set is unchanged."
+        )
+        return
+
+    host_patterns = tuple(
+        (rule.label, tuple(_translated_host_patterns(rule))) for rule in excluding
+    )
+    _guard_root_doc(config, host_patterns)
+
+    base_exclude = tuple(config.exclude_patterns)
+    appended = [pattern for _, patterns in host_patterns for pattern in patterns]
+    config.exclude_patterns = [*config.exclude_patterns, *appended]
+    gated = _fold_into_mounts(config, excluding)
+
+    setattr(
+        app,
+        _VARIANT_STATE_KEY,
+        _VariantState(
+            host_patterns=host_patterns,
+            base_exclude_patterns=base_exclude,
+            gated_mounts=gated,
+            false_rules=tuple((rule.label, rule.files) for rule in excluding),
+        ),
+    )
+    logger.info(
+        "sphinx-mounts: %d of %d `variant_sources` rule(s) exclude for this "
+        "variant; %d exclude_patterns entr(ies) added, %d mount(s) narrowed.",
+        len(excluding),
+        len(rules),
+        len(appended),
+        len(gated),
+    )
+
+
+def _usable_rules(spec: VariantSourcesConfig) -> tuple[VariantRule, ...]:
+    """Drop the rules that name no files, reporting each.
+
+    An empty ``files`` list is the **one** safe drop, and the reason it is safe
+    is the reason no other drop is: a rule that named nothing has nothing to
+    leak, so dropping it leaves the document set unchanged rather than putting
+    files back into the build.
+    """
+    usable: list[VariantRule] = []
+    for rule in spec.rules:
+        if not rule.files:
+            msg = (
+                f"sphinx-mounts: {rule.label} lists no files, so it gates "
+                f"nothing; the rule is dropped. Give it at least one glob, or "
+                f"remove it."
+            )
+            log_warning(logger, msg, "variant_rule_dropped")
+            continue
+        usable.append(rule)
+    return tuple(usable)
+
+
+def _refuse_glob_dialects(rules: tuple[VariantRule, ...], toml_path: Path) -> None:
+    """Refuse the whole configuration if any glob has no faithful translation.
+
+    Every offender is listed at once. Fixing one refused pattern only to meet
+    the next on the following build is exactly the experience this avoids, and
+    it is cheap to avoid because the check is a pure function of the text.
+    """
+    offenders: list[str] = []
+    for rule in rules:
+        for pattern in rule.files:
+            reason = dialect.refuse(pattern)
+            if reason is not None:
+                offenders.append(f"  {rule.label}: {pattern!r} — {reason}")
+    if not offenders:
+        return
+    listed = "\n".join(offenders)
+    msg = (
+        f"sphinx-mounts: {len(offenders)} `variant_sources` glob(s) in "
+        f"{toml_path} cannot be interpreted the same way by every tool that "
+        f"reads this file, so the configuration is refused:\n{listed}\n"
+        f"This is deliberately not a warning that skips the rule: skipping a "
+        f"rule leaves every file it names in the build, including the files "
+        f"its other patterns name, which is the one outcome a gating key must "
+        f"not have. [mounts.variant_glob_dialect]"
+    )
+    raise VariantRuleError(msg)
+
+
+def _guard_layout(
+    app: Sphinx,
+    config: Config,
+    spec: VariantSourcesConfig,
+    rules: tuple[VariantRule, ...],
+) -> None:
+    """Require the rules' anchor to be Sphinx's ``srcdir``.
+
+    A rule glob is anchored at the project's source root; an
+    ``exclude_patterns`` entry is anchored at ``srcdir``. When the two
+    coincide the mapping is the identity and a rule means one thing. When they
+    do not, a prefix-shifted rewrite is *mechanically* possible for a
+    path-naming pattern and has no correct form at all for a basename-matching
+    one — and silently gating only the root that happens to coincide is the
+    failure this whole feature exists to prevent. So it is refused, naming both
+    directories and the fix.
+
+    Roots that are a **mount** root are not a layout problem: those are the
+    mount arm's business, and it reaches them by handing the mount's own walker
+    the translated pattern.
+
+    Variant-independent, so it runs before any condition is evaluated: a layout
+    no pattern can be anchored in is wrong in every variant.
+    """
+    srcdir = Path(app.srcdir).resolve()
+    mount_dirs = _raw_mount_dirs(config)
+    host_roots = [root for root in spec.source_dirs if root not in mount_dirs]
+    if host_roots == [srcdir]:
+        return
+    listed = ", ".join(str(root) for root in spec.source_dirs) or "(none)"
+    named = "\n".join(f"  {rule.label}" for rule in rules)
+    relative = _relative_hint(srcdir, spec.toml_path.parent)
+    msg = (
+        f"sphinx-mounts: `{spec.toml_path}` declares "
+        f"`[[source.variant_sources]]`, but the source root(s) its globs are "
+        f"anchored at ({listed}) are not Sphinx's source directory "
+        f"({srcdir}), so no rule glob can be expressed as an "
+        f"`exclude_patterns` entry:\n{named}\n"
+        f"Declare the Sphinx source directory as the source root — "
+        f"`[source] dir = [{relative!r}]` in that file — or move the file "
+        f"beside it. Gating only the root that happens to coincide would "
+        f"publish files a rule excludes, which is the failure this key exists "
+        f"to prevent. [mounts.variant_layout]"
+    )
+    raise VariantRuleError(msg)
+
+
+def _relative_hint(srcdir: Path, toml_dir: Path) -> str:
+    """Render ``srcdir`` relative to the TOML's directory, for the fix advice."""
+    try:
+        return srcdir.relative_to(toml_dir).as_posix()
+    except ValueError:
+        return srcdir.as_posix()
+
+
+def _raw_mount_dirs(config: Config) -> set[Path]:
+    """Resolved ``dir`` of every mount currently configured."""
+    dirs: set[Path] = set()
+    for entry in getattr(config, "mounts", None) or ():
+        raw = (
+            entry.get("dir")
+            if isinstance(entry, Mapping)
+            else getattr(entry, "dir", None)
+        )
+        if raw:
+            dirs.add(Path(raw).resolve())
+    return dirs
+
+
+def _resolve_variant_map(
+    app: Sphinx, config: Config, spec: VariantSourcesConfig
+) -> dict[str, Any] | None:
+    """Compute the merged variant map, or ``None`` to stand down.
+
+    The read rule, in one paragraph: take ``needs_variant_data`` and
+    ``needs_variant_data_file`` off the config; when the attributes are
+    **absent** — sphinx-needs is not installed — fall back to the ``[needs]``
+    table of the same TOML file this extension already reads. Then
+    *unconditionally* deep-merge the file under the inline values. On a
+    sphinx-needs that already resolved, the re-merge is a proven no-op; on
+    8.3.1 and earlier it supplies the merge sphinx-needs has not performed yet;
+    with sphinx-needs absent it is the whole computation. So there is no
+    version gate, no import and no feature detection, and the answer always
+    agrees with whatever sphinx-needs computed.
+
+    **Two anchors, not one.** A relative ``variant_data_file`` declared in the
+    TOML is absolutised against the TOML's own directory (sphinx-needs' own
+    ``toml_convert`` does the same); one declared in ``conf.py`` or with ``-D``
+    is absolutised against ``confdir``. Reading only one anchor means reading
+    the wrong file for one of the two routes.
+
+    Returns ``None`` when the data is unreadable **and sphinx-needs is
+    present**: it will raise its own ``NeedsConfigException`` for the same
+    file, so reporting here would be a second message for one problem. The
+    build stops on its error, not on a fold this reader skipped.
+    """
+    present = hasattr(config, "needs_variant_data") or hasattr(
+        config, "needs_variant_data_file"
+    )
+    if present:
+        inline = getattr(config, "needs_variant_data", None)
+        raw_file = getattr(config, "needs_variant_data_file", None)
+        file_ref = _anchor_data_file(raw_file, Path(app.confdir))
+    else:
+        inline = spec.variant_data
+        file_ref = spec.variant_data_file
+    try:
+        return resolve_variant_data(inline, file_ref)
+    except VariantDataError as exc:
+        if present:
+            logger.info(
+                "sphinx-mounts: the variant data could not be read (%s); "
+                "sphinx-needs reports this itself, so the `variant_sources` "
+                "fold stands down rather than reporting it twice.",
+                exc,
+            )
+            return None
+        msg = (
+            f"sphinx-mounts: the variant data could not be read, so there is "
+            f"no defensible answer to which files this variant contains: "
+            f"{exc}. sphinx-needs is not installed, so nothing else will "
+            f"report this. [mounts.variant_data_unreadable]"
+        )
+        raise VariantRuleError(msg) from exc
+
+
+def _anchor_data_file(raw: Any, confdir: Path) -> Path | None:
+    """Absolutise a ``needs_variant_data_file`` value against ``confdir``.
+
+    A TOML-declared path arrives already absolute (sphinx-needs absolutises it
+    against the TOML's directory at priority 10), so only the ``conf.py`` /
+    ``-D`` route reaches the join — which is exactly the anchor sphinx-needs
+    uses for it.
+    """
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (confdir / candidate).resolve()
+
+
+def _excluding_rules(
+    rules: tuple[VariantRule, ...], variant_data: dict[str, Any]
+) -> tuple[VariantRule, ...]:
+    """Return the rules that are FALSE, i.e. the ones that exclude their files.
+
+    *Every rule whose condition is false excludes its files; a file no false
+    rule matches is unaffected.* Equivalently: a file is in the build unless
+    some rule matching it is false, which is an AND over the conditions of all
+    rules matching it. Order-independent, and rules only ever narrow.
+
+    Two failure modes, on opposite sides of the line:
+
+    * a condition **outside the grammar** is a hard error, listing every
+      offender at once. It is statically knowable, so it is a configuration
+      mistake rather than something to evaluate;
+    * a condition inside the grammar that cannot be **evaluated** — an unknown
+      ``var.*`` key, a type mismatch — is reported and the rule EXCLUDES. That
+      is the warn-and-exclude contract the ``.. if::`` directive already has,
+      and the safe direction for a key whose purpose is keeping content out.
+    """
+    offenders: list[str] = []
+    validated: list[tuple[VariantRule, Any]] = []
+    for rule in rules:
+        try:
+            validated.append((rule, validate(rule.condition)))
+        except VariantConditionError as exc:
+            offenders.append(f"  {rule.label}: {exc}")
+    if offenders:
+        listed = "\n".join(offenders)
+        msg = (
+            f"sphinx-mounts: {len(offenders)} `variant_sources` condition(s) "
+            f"are outside the rule grammar, so the configuration is "
+            f"refused:\n{listed}\n"
+            f"A rule condition is comparisons, `in` / `not in`, `is None` / "
+            f"`is not None`, `.startswith(…)` / `.endswith(…)`, `and` / `or` / "
+            f"`not`, parentheses, nested `var.*` access and the literals "
+            f"`True` / `False`. It must be boolean-valued and every field "
+            f"reference must be rooted at `var`."
+        )
+        raise VariantRuleError(msg)
+    excluding: list[VariantRule] = []
+    for rule, tree in validated:
+        try:
+            holds = interpret(tree, variant_data)
+        except VariantEvalError as exc:
+            msg = (
+                f"sphinx-mounts: {rule.label} could not be evaluated against "
+                f"the variant data: {exc}. The rule's files are excluded — the "
+                f"safe direction for a rule whose purpose is keeping content "
+                f"out of the build."
+            )
+            log_warning(logger, msg, "variant_rule_unevaluable")
+            holds = False
+        if not holds:
+            excluding.append(rule)
+    return tuple(excluding)
+
+
+def _translated_host_patterns(rule: VariantRule) -> list[str]:
+    """Every ``exclude_patterns`` entry one FALSE rule contributes."""
+    return [
+        pattern
+        for authored in rule.files
+        for pattern in dialect.to_exclude_patterns(authored)
+    ]
+
+
+def _guard_root_doc(
+    config: Config, host_patterns: tuple[tuple[str, tuple[str, ...]], ...]
+) -> None:
+    """Refuse a FALSE rule that would exclude ``root_doc``.
+
+    Sphinx's own reaction is to abort with *"Sphinx is unable to load the
+    master document … The master document must be within the source directory
+    or a subdirectory of it"* — which is actively misleading for this cause:
+    the document is inside the source directory, and excluded. A user reading
+    it spends the next ten minutes checking paths.
+
+    The check is **exact** here, and that is a deliberate divergence from
+    ubCode, whose equivalent guard is best-effort in one corner because it has
+    to infer candidate suffixes from the project's include globs.
+    ``config.source_suffix`` is a concrete registered list, so the candidate
+    paths are the real ones.
+
+    Variant-**dependent**, unlike the glob-dialect refusal: a rule matching the
+    root document is perfectly legal while its condition holds, so
+    ``files = ["**"]`` with a true condition is a valid "this whole tree, this
+    variant only".
+    """
+    root_doc = getattr(config, "root_doc", "index")
+    candidates = [f"{root_doc}{suffix}" for suffix in _source_suffixes(config)]
+    for label, patterns in host_patterns:
+        for pattern in patterns:
+            hit = next((c for c in candidates if patmatch(c, pattern)), None)
+            if hit is None:
+                continue
+            msg = (
+                f"sphinx-mounts: {label} is false for this variant and its "
+                f"pattern {pattern!r} would exclude the root document "
+                f"{hit!r}. The root document is what the navigation tree and "
+                f"the document ordering are built from, so a build without it "
+                f"is not a smaller site — Sphinx would abort with a message "
+                f"blaming the source directory. Narrow the rule's pattern, or "
+                f"change `root_doc`. [mounts.variant_root_doc]"
+            )
+            raise VariantRuleError(msg)
+
+
+def _source_suffixes(config: Config) -> tuple[str, ...]:
+    """Registered source suffixes, tolerating every shape of the confval.
+
+    Sphinx normalises ``source_suffix`` to a mapping in a ``config-inited``
+    handler at priority **800**, which is after this reader, so at this point
+    the value may still be the string or list the user wrote.
+    """
+    raw = getattr(config, "source_suffix", None)
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, Mapping):
+        return tuple(raw)
+    if isinstance(raw, list | tuple):
+        return tuple(str(item) for item in raw)
+    return (".rst",)
+
+
+def _fold_into_mounts(
+    config: Config, excluding: tuple[VariantRule, ...]
+) -> tuple[_GatedMount, ...]:
+    """Fold the FALSE rules into the mount tables, then reassign the value.
+
+    Two code paths for two mount modes, as everywhere else in this extension:
+
+    * **directory mode** appends the gitignore translation to the entry's
+      ``exclude``. That list is already a last-match-wins override list, and
+      every ``include`` is added before every ``exclude``, so an appended
+      variant exclude beats any user ``include`` — which is exactly the
+      "rules only narrow" semantics wanted.
+    * **file-list mode** has no walker to hand a pattern to, so the ``files``
+      array is filtered instead. A rule glob selects a listed file by its
+      **basename** (the anchor that works in a flat namespace, and the one a
+      separator-less pattern means anyway) or by its path relative to the TOML
+      directory when the pattern carries a separator.
+
+    ``config["mounts"]`` is reassigned at the end even though the entries were
+    mutated in place, because it is the config *value* changing that makes a
+    gating flip a ``[config changed ('mounts')]`` rebuild.
+    """
+    raw = getattr(config, "mounts", None)
+    if not raw:
+        return ()
+    gated: list[_GatedMount] = []
+    folded: list[Any] = []
+    for index, entry in enumerate(raw):
+        if isinstance(entry, Mapping):
+            new_entry, record = _fold_into_mount_entry(dict(entry), index, excluding)
+        elif isinstance(entry, MountConfig):
+            new_entry, record = _fold_into_mount_config(entry, index, excluding)
+        else:
+            new_entry, record = entry, None
+        folded.append(new_entry)
+        if record is not None:
+            gated.append(record)
+    config["mounts"] = folded
+    return tuple(gated)
+
+
+def _fold_into_mount_entry(
+    entry: dict[str, Any], index: int, excluding: tuple[VariantRule, ...]
+) -> tuple[dict[str, Any], _GatedMount | None]:
+    """Fold into one raw TOML mount table."""
+    mount_at = entry.get("mount_at")
+    mount_at = mount_at.strip("/") if isinstance(mount_at, str) else None
+    if "dir" in entry:
+        before = tuple(entry.get("exclude") or ())
+        added = [
+            dialect.to_gitignore(pattern)
+            for rule in excluding
+            for pattern in rule.files
+        ]
+        entry["exclude"] = [*before, *added]
+        return entry, _GatedMount(
+            index=index,
+            mount_at=mount_at,
+            dir=Path(entry["dir"]) if isinstance(entry["dir"], str) else None,
+            include=tuple(entry.get("include") or ()),
+            gitignore=bool(entry.get("gitignore", True)),
+            excludes_before=before,
+            excludes_after=tuple(entry["exclude"]),
+        )
+    files = entry.get("files")
+    if not isinstance(files, list):
+        return entry, None
+    kept, dropped = _filter_listed_files(files, excluding)
+    if not dropped:
+        return entry, None
+    entry["files"] = kept
+    return entry, _GatedMount(
+        index=index,
+        mount_at=mount_at,
+        dir=None,
+        include=(),
+        gitignore=True,
+        excludes_before=(),
+        excludes_after=(),
+        dropped_files=dropped,
+    )
+
+
+def _fold_into_mount_config(
+    mount: MountConfig, index: int, excluding: tuple[VariantRule, ...]
+) -> tuple[MountConfig, _GatedMount | None]:
+    """Fold into a ``conf.py``-declared :class:`MountConfig`.
+
+    The legacy path carries dataclass instances rather than tables, so the fold
+    replaces the instance instead of mutating a dict. Same two modes, same
+    semantics — a variant rule must not mean one thing in TOML and another in
+    ``conf.py``.
+    """
+    if mount.dir is not None:
+        added = tuple(
+            dialect.to_gitignore(pattern)
+            for rule in excluding
+            for pattern in rule.files
+        )
+        updated = replace(mount, exclude=(*mount.exclude, *added))
+        return updated, _GatedMount(
+            index=index,
+            mount_at=mount.mount_at,
+            dir=mount.dir,
+            include=mount.include,
+            gitignore=mount.gitignore,
+            excludes_before=mount.exclude,
+            excludes_after=updated.exclude,
+        )
+    if mount.files is None:
+        return mount, None
+    kept, dropped = _filter_listed_files([str(f) for f in mount.files], excluding)
+    if not dropped:
+        return mount, None
+    return replace(mount, files=tuple(Path(f) for f in kept)), _GatedMount(
+        index=index,
+        mount_at=mount.mount_at,
+        dir=None,
+        include=(),
+        gitignore=True,
+        excludes_before=(),
+        excludes_after=(),
+        dropped_files=dropped,
+    )
+
+
+def _filter_listed_files(
+    files: list[Any], excluding: tuple[VariantRule, ...]
+) -> tuple[list[Any], dict[str, str]]:
+    """Split a ``files`` array into what survives and what a rule removed."""
+    kept: list[Any] = []
+    dropped: dict[str, str] = {}
+    for raw in files:
+        if not isinstance(raw, str):
+            kept.append(raw)
+            continue
+        name = Path(raw).name
+        label = next(
+            (
+                rule.label
+                for rule in excluding
+                for pattern in rule.files
+                if dialect.matches(pattern, name)
+            ),
+            None,
+        )
+        if label is None:
+            kept.append(raw)
+        else:
+            dropped[raw] = label
+    return kept, dropped
+
+
+# ---------------------------------------------------------------------------
+# Attribution: which docnames the rules removed, and which rule removed each
+# ---------------------------------------------------------------------------
+
+
+def _on_install_variant_filter(app: Sphinx) -> None:
+    """Work out what the rules removed, and hook the toctree downgrade.
+
+    Runs at ``builder-inited``, after ``app.project`` exists, because the
+    docname derivation needs the project's registered source suffixes — and
+    because the walk it costs should not happen for a project whose rules all
+    hold, which is decided at config time.
+
+    **This is the one new IO**, and it is bounded: one extra pass over the
+    source directory plus one per narrowed mount, only for a project that
+    declares rules *and* has at least one false rule. It is needed because an
+    excluded file is pruned at the walk, so nothing downstream can tell it from
+    a file that was never written — which is the property the feature wants,
+    and also why the downgrade has to be *told* which documents a variant
+    removed rather than inferring it.
+    """
+    state: _VariantState | None = getattr(app, _VARIANT_STATE_KEY, None)
+    if state is None:
+        mount_warnings.remove_downgrade_filters()
+        return
+    suffixes = tuple(app.project.source_suffix)
+    excluded = _host_excluded_docnames(app, state, suffixes)
+    excluded.update(_mount_excluded_docnames(state, suffixes))
+    if not excluded:
+        mount_warnings.remove_downgrade_filters()
+        return
+    _, names, degraded = mount_warnings.install_downgrade_filter(excluded)
+    if degraded:
+        msg = (
+            f"sphinx-mounts: could not resolve the emitting toctree logger(s) "
+            f"from Sphinx's own modules and fell back to the hard-coded "
+            f"name(s) {list(degraded)}. Variant-excluded toctree references "
+            f"may still be reported as warnings on this Sphinx version. This "
+            f"is a compatibility problem in sphinx-mounts, not in your project."
+        )
+        logger.warning(msg)
+    logger.info(
+        "sphinx-mounts: %d document(s) excluded by variant rules; toctree "
+        "references to them are downgraded on %r.",
+        len(excluded),
+        list(names),
+    )
+
+
+def _host_excluded_docnames(
+    app: Sphinx, state: _VariantState, suffixes: tuple[str, ...]
+) -> dict[str, str]:
+    """Docnames the host arm removed, each mapped to the rule that removed it.
+
+    Computed as a diff of two ``get_matching_files`` passes — the same function
+    ``Project.discover`` itself goes through — so it cannot disagree with what
+    discovery actually did.
+    """
+    srcdir = Path(app.srcdir)
+    base = [
+        *state.base_exclude_patterns,
+        *app.config.templates_path,
+        *EXCLUDE_PATHS,
+    ]
+    variant = [pattern for _, patterns in state.host_patterns for pattern in patterns]
+    include = app.config.include_patterns
+    before = set(get_matching_files(srcdir, include, base))
+    after = set(get_matching_files(srcdir, include, [*base, *variant]))
+    excluded: dict[str, str] = {}
+    for relative in sorted(before - after):
+        docname = _docname_for(relative, suffixes)
+        if docname is None:
+            continue
+        label = next(
+            (
+                label
+                for label, patterns in state.host_patterns
+                if any(patmatch(relative, pattern) for pattern in patterns)
+            ),
+            state.host_patterns[0][0],
+        )
+        excluded[docname] = label
+    return excluded
+
+
+def _mount_excluded_docnames(
+    state: _VariantState, suffixes: tuple[str, ...]
+) -> dict[str, str]:
+    """Docnames the mount arm removed, each mapped to the rule that removed it."""
+    excluded: dict[str, str] = {}
+    for gated in state.gated_mounts:
+        if gated.dropped_files:
+            for raw, label in gated.dropped_files.items():
+                docname = _docname_for(Path(raw).name, suffixes)
+                if docname is not None:
+                    excluded[_join_mount(gated.mount_at, docname)] = label
+            continue
+        if gated.dir is None or not gated.dir.is_dir():
+            continue
+        before = _walked_relatives(gated, gated.excludes_before)
+        after = _walked_relatives(gated, gated.excludes_after)
+        for relative in sorted(before - after):
+            docname = _docname_for(relative, suffixes)
+            if docname is None:
+                continue
+            label = next(
+                (
+                    label
+                    for label, authored in state.false_rules
+                    if any(dialect.matches(p, relative) for p in authored)
+                ),
+                state.false_rules[0][0],
+            )
+            excluded[_join_mount(gated.mount_at, docname)] = label
+    return excluded
+
+
+def _walked_relatives(gated: _GatedMount, excludes: tuple[str, ...]) -> set[str]:
+    """Mount-relative POSIX paths one walk configuration produces."""
+    assert gated.dir is not None  # noqa: S101 - guarded by the caller
+    walker = _build_walker(
+        gated.dir,
+        include=gated.include,
+        exclude=excludes,
+        gitignore=gated.gitignore,
+    )
+    return {
+        entry.path().relative_to(gated.dir).as_posix()
+        for entry in walker
+        if entry.path().is_file()
+    }
+
+
+def _docname_for(relative: str, suffixes: tuple[str, ...]) -> str | None:
+    """Strip the first matching registered suffix, as Sphinx core does."""
+    suffix = _match_suffix(relative, suffixes)
+    if suffix is None or len(suffix) >= len(relative):
+        return None
+    return relative[: -len(suffix)]
+
+
 def setup(app: Sphinx) -> dict[str, Any]:
     """Register the extension with Sphinx."""
     app.add_config_value("mounts", default=[], rebuild="env", types=(list,))
+    app.add_config_value(
+        "sources_from_toml",
+        default=DEFAULT_TOML_FILENAME,
+        rebuild="env",
+        types=(str, type(None)),
+    )
+    # Deprecated spelling of the value above, still honoured. See
+    # ``_resolve_toml_setting`` for the precedence rule and for why the rename
+    # happened at all.
     app.add_config_value(
         "mounts_from_toml",
         default=DEFAULT_TOML_FILENAME,
@@ -536,8 +1389,15 @@ def setup(app: Sphinx) -> dict[str, Any]:
     # Priority is "lower = earlier"; the TOML loader must run before the
     # validator so that the TOML-derived list is what gets validated.
     app.connect("config-inited", _on_load_toml, priority=400)
+    # 450 is the only slot that is after sphinx-needs' variant resolution (11),
+    # after the mount tables are loaded (400) and before they are parsed (500).
+    # See ``_on_load_variants``.
+    app.connect("config-inited", _on_load_variants, priority=450)
     app.connect("config-inited", _on_config_inited, priority=500)
     app.connect("builder-inited", _on_builder_inited)
+    # After ``_on_builder_inited``, because the docname derivation reads the
+    # project's registered source suffixes.
+    app.connect("builder-inited", _on_install_variant_filter, priority=600)
     # Must run before the read phase: it is what makes an ``attach_to`` host
     # doc be re-read when a mount's set of wired entries changed, which is
     # the only way ``_on_doctree_read`` gets a chance to fix the wiring.
@@ -569,7 +1429,16 @@ def setup(app: Sphinx) -> dict[str, Any]:
         # this extension puts into the env changes — the pickled shape of
         # ``_MountAwareProject`` (see its ``__getstate__``) or the layout of
         # the wiring signature.
-        "env_version": 1,
+        #
+        # 1 -> 2: the `[[source.variant_sources]]` reader changes **which
+        # docnames the project produces**, so an environment written before it
+        # existed describes a document set this version would not have built.
+        # A stale `.doctrees` cache must start fresh rather than be restored
+        # into a shape its writer never produced, which is why this is a
+        # version bump and not just a config change: the config *values* do
+        # converge on their own (both are `rebuild="env"`), but only for a
+        # cache that already knows about the reader.
+        "env_version": 2,
         "parallel_read_safe": True,
         "parallel_write_safe": True,
     }
