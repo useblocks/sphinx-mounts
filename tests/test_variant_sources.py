@@ -722,21 +722,8 @@ def test_a_warning_about_an_asset_path_is_never_downgraded(make_app, tmp_path):
         )
 
 
-def test_a_non_ascii_docname_is_attributed(make_app, tmp_path):
-    """The attribution set and ``found_docs`` must agree on Unicode form.
-
-    ``Project.path2doc`` runs its path through ``path_stabilize``, which
-    NFC-normalises — and on macOS ``os.scandir`` yields **NFD** names, so a
-    reader slicing a raw path would key the attribution set in NFD while
-    ``found_docs`` holds NFC, and the downgrade would miss.
-
-    The earlier form of this docstring claimed ``get_matching_files`` already
-    NFC-normalises every entry it yields — measured on macOS only, and CI on
-    Linux proved it false there: the raw NFD filename reached the attribution
-    set while the warning's docname was NFC, and the downgrade missed. The
-    normalisation is therefore OURS (``_docname_for`` NFC-normalises), and this
-    test is the cross-platform fence for it.
-    """
+def _non_ascii_project(tmp_path, file_form: str):
+    """A project gating ``café.rst``, the FILE written in ``file_form``."""
     toml = """
     [[source.variant_sources]]
     if = "var.edition == 'pro'"
@@ -746,8 +733,7 @@ def test_a_non_ascii_docname_is_attributed(make_app, tmp_path):
     edition = "basic"
     """
     confdir, _ = make_project(tmp_path, toml=toml)
-    # Written in NFD — the form macOS stores and returns.
-    name = unicodedata.normalize("NFD", "café.rst")
+    name = unicodedata.normalize(file_form, "café.rst")
     _write(
         confdir / name,
         """
@@ -763,7 +749,10 @@ def test_a_non_ascii_docname_is_attributed(make_app, tmp_path):
         ),
         encoding="utf-8",
     )
-    app = _build(make_app, confdir)
+    return confdir
+
+
+def _assert_cafe_downgraded(app):
     nfc = unicodedata.normalize("NFC", "café")
     assert nfc + ".html" not in _pages(app)
     # The toctree reference to it is downgraded, not left as a warning. Only
@@ -773,6 +762,51 @@ def test_a_non_ascii_docname_is_attributed(make_app, tmp_path):
     assert nfc not in warning and "caf" not in warning
     assert nfc in app._status.getvalue()
     assert mount_warnings.VARIANT_EXCLUDED_CODE in app._status.getvalue()
+
+
+def test_a_non_ascii_docname_is_attributed(make_app, tmp_path):
+    """A gated non-ASCII document is attributed and downgraded — everywhere.
+
+    The file is written in NFC, the form a git checkout carries on every
+    platform, so this half of the fence runs unconditionally.
+    """
+    confdir = _non_ascii_project(tmp_path, "NFC")
+    _assert_cafe_downgraded(_build(make_app, confdir))
+
+
+def test_an_nfd_named_file_is_attributed_where_the_filesystem_equates_forms(
+    make_app, tmp_path
+):
+    """The attribution set and ``found_docs`` must agree on Unicode form.
+
+    ``Project.path2doc`` NFC-normalises via ``path_stabilize``, and macOS
+    filesystems hand ``os.scandir`` NFD names while everything authored is
+    NFC — so a reader keying the attribution set off a raw path would key it
+    in NFD and the downgrade would miss. ``_docname_for`` NFC-normalises to
+    close that, and this test writes the FILE in NFD to prove it.
+
+    The scenario only EXISTS on a normalization-insensitive filesystem
+    (macOS): released Sphinx 8/9 NFC-normalise inside ``get_matching_files``
+    and stat the NFC name, and 7.4 reads back the docname's NFC path — so on
+    a byte-exact filesystem (ext4) an NFD-named file referenced in NFC is
+    invisible or unreadable to Sphinx ITSELF, in every variant, and the
+    surviving warning is genuine rather than variant-caused. Probed at
+    runtime rather than by platform name, because the property belongs to
+    the filesystem, not the OS.
+
+    History: this fence first ran only on macOS-backed environments, where a
+    "get_matching_files already NFC-normalises" measurement looked
+    universal; Linux CI proved the SCENARIO (not just the measurement) was
+    platform-bound, hence the split and the probe.
+    """
+    confdir = _non_ascii_project(tmp_path, "NFD")
+    nfc_name = unicodedata.normalize("NFC", "café.rst")
+    if not (confdir / nfc_name).is_file():
+        pytest.skip(
+            "byte-exact filesystem: an NFD-named file is invisible to Sphinx "
+            "itself under its NFC name, so the scenario cannot be constructed"
+        )
+    _assert_cafe_downgraded(_build(make_app, confdir))
 
 
 def test_a_docname_another_file_still_provides_is_not_downgraded(make_app, tmp_path):
