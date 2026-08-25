@@ -398,14 +398,19 @@ edition = "EDITION"
 
 
 def test_a_mount_only_flip_converges(make_app, tmp_path):
-    """``config.mounts`` alone is enough to invalidate the environment.
+    """The mount arm's fold reaches a mount even when no host file is named.
 
-    Isolated from the host arm on purpose: with no ``exclude_patterns`` entry
-    changing, the only thing that differs across the flip is the mounts config
-    value. If the mount arm stopped folding into that value — a post-walk
-    filter, or a fold that mutates a copy and never reassigns — the value would
-    be byte-identical across the flip, nothing would invalidate, and the second
-    build would still hold the gated document.
+    This does NOT isolate ``config.mounts`` as the invalidator, and an earlier
+    version of this docstring claimed it did. Measured: the fold appends the
+    translated host patterns for **every** false rule whether or not a host
+    file matches, so ``exclude_patterns`` changes across this flip too and
+    Sphinx reports ``[config changed ('exclude_patterns')]``. No configuration
+    can isolate the mounts value, because both always move together.
+
+    That behaviour is kept deliberately — it mirrors the sibling reader's
+    append-to-every-root and is harmless — so what this test is worth is the
+    other half: if the mount arm stopped folding, the gated document would
+    still be built, and the assertions below would catch it.
     """
     confdir, _ = make_project(tmp_path, toml=MOUNT_ONLY_TOML.replace("EDITION", "pro"))
     builddir = tmp_path / "build"
@@ -1428,6 +1433,60 @@ def test_a_toml_declared_data_file_anchors_at_the_toml_directory(make_app, tmp_p
     assert "hostgated.html" in _pages(app)
 
 
+def test_a_mispointed_sphinx_needs_is_refused(make_app, tmp_path):
+    """The corner where a project silently loses every gated file.
+
+    sphinx-needs is loaded but was never pointed at this file, so its resolved
+    map is empty — and this reader takes the map FROM sphinx-needs whenever it
+    is installed, precisely so the two tools cannot disagree. Every rule then
+    reports an unknown key and excludes, and the whole gated document set
+    disappears.
+
+    It used to be a per-rule *suppressible* warning, which contradicts this
+    key's own rule: for a gating key, a failure behind a diagnostic a project
+    can silence is not a failure — and ``suppress_warnings = ["mounts"]`` is
+    recommended in these very docs.
+    """
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml)
+    _stub_conf(confdir, "needs_stub_unpointed", inline="{}", file_ref="None")
+    with pytest.raises(Exception) as excinfo:
+        _build(make_app, confdir)
+    message = str(excinfo.value)
+    assert "needs_from_toml" in message, "the one-line fix is named"
+    assert "variant_data_unreadable" in message
+
+
+def test_a_conf_py_supplied_map_is_not_mistaken_for_a_mispointing(make_app, tmp_path):
+    """The negative half: a non-empty map from anywhere is legitimate.
+
+    A project may supply the variant map from ``conf.py`` or ``-D`` while the
+    TOML also declares one. That is not a mispointing, and the conjunction is
+    narrow enough to say so — the resolved map is not empty.
+    """
+    toml = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(tmp_path, toml=toml)
+    _stub_conf(
+        confdir, "needs_stub_confpy", inline='{"edition": "pro"}', file_ref="None"
+    )
+    app = _build(make_app, confdir)
+    assert "hostgated.html" in _pages(app), "the conf.py map wins and the rule holds"
+
+
 def test_unreadable_variant_data_is_a_hard_error_without_sphinx_needs(
     make_app, tmp_path
 ):
@@ -1498,6 +1557,78 @@ def test_sources_from_toml_none_disables_the_variant_reader_too(make_app, tmp_pa
     )
     app = _build(make_app, confdir)
     assert "hostgated.html" in _pages(app)
+
+
+#: ``(conf.py lines, which file is read, whether the deprecation fires)``.
+#:
+#: The wrong-file row is the third one: the author used the CURRENT spelling and
+#: named a file explicitly, and the DEPRECATED key won — because inferring
+#: "explicit" from the value cannot tell "wrote the default" from "wrote
+#: nothing". It is reachable during exactly the migration the pair exists for.
+CONFVAL_MATRIX = [
+    ("", "ubproject.toml", False),
+    ('sources_from_toml = "other.toml"', "other.toml", False),
+    ('mounts_from_toml = "other.toml"', "other.toml", True),
+    (
+        'sources_from_toml = "ubproject.toml"\nmounts_from_toml = "other.toml"',
+        None,
+        None,
+    ),
+    (
+        'sources_from_toml = "other.toml"\nmounts_from_toml = "other.toml"',
+        "other.toml",
+        True,
+    ),
+    ('mounts_from_toml = "ubproject.toml"', "ubproject.toml", True),
+]
+
+
+@pytest.mark.parametrize(
+    ("lines", "reads", "deprecates"),
+    CONFVAL_MATRIX,
+    ids=[
+        "neither",
+        "new-only",
+        "old-only",
+        "new-default-plus-old-elsewhere",
+        "both-same",
+        "old-set-to-default",
+    ],
+)
+def test_the_confval_matrix(
+    make_app, tmp_path, lines: str, reads: str | None, deprecates: bool | None
+):
+    """Which file is read, and whether the rename is nudged.
+
+    Both TOML files exist and disagree, so "which file was read" is observable
+    from the output rather than inferred: ``ubproject.toml`` keeps
+    ``hostgated``, ``other.toml`` gates it away.
+    """
+    keeping = """
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "pro"
+    """
+    gating = keeping.replace('edition = "pro"', 'edition = "basic"')
+    confdir, _ = make_project(tmp_path, toml=keeping)
+    _write(confdir / "other.toml", gating)
+    conf = confdir / "conf.py"
+    conf.write_text(
+        conf.read_text(encoding="utf-8") + "\n" + lines + "\n", encoding="utf-8"
+    )
+
+    if reads is None:
+        with pytest.raises(Exception, match="Keep exactly one"):
+            _build(make_app, confdir)
+        return
+
+    app = _build(make_app, confdir)
+    gated = "hostgated.html" not in _pages(app)
+    assert gated is (reads == "other.toml"), f"expected to read {reads}"
+    assert ("mounts.deprecated_confval" in app._warning.getvalue()) is deprecates
 
 
 def test_a_project_with_no_mounts_can_use_variant_rules(make_app, tmp_path):

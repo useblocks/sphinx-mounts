@@ -581,6 +581,17 @@ def _resolve_toml_setting(app: Sphinx, config: Config) -> str | None:
     reads from TOML — mounts and variant rules alike, so the coupling is named
     rather than discovered.
 
+    "Set" means WRITTEN, not "different from the default" — see
+    :func:`_is_explicit`. Inferring it from the value produced three wrong
+    answers, the worst of which read the wrong file: with
+    ``sources_from_toml = "ubproject.toml"`` (the current spelling, named
+    explicitly) beside ``mounts_from_toml = "other.toml"``, the deprecated key
+    silently won, because writing the default value is indistinguishable from
+    not writing the key. That is reachable during exactly the migration this
+    pair exists for — someone adds the new key and forgets to delete the old
+    line. The other two were missing warnings: both keys set to the same
+    non-default value, and the old key set to the default.
+
     The decision is cached on the application, so the deprecation warning fires
     once per build rather than once per reader.
     """
@@ -591,8 +602,8 @@ def _resolve_toml_setting(app: Sphinx, config: Config) -> str | None:
         return cached[0]
     new_value = getattr(config, "sources_from_toml", DEFAULT_TOML_FILENAME)
     old_value = getattr(config, "mounts_from_toml", DEFAULT_TOML_FILENAME)
-    new_explicit = new_value != DEFAULT_TOML_FILENAME
-    old_explicit = old_value != DEFAULT_TOML_FILENAME
+    new_explicit = _is_explicit(config, "sources_from_toml")
+    old_explicit = _is_explicit(config, "mounts_from_toml")
     if new_explicit and old_explicit and new_value != old_value:
         msg = (
             f"sphinx-mounts: `sources_from_toml` is set to {new_value!r} and "
@@ -602,9 +613,12 @@ def _resolve_toml_setting(app: Sphinx, config: Config) -> str | None:
             f"`sources_from_toml` is the current spelling."
         )
         raise TomlConfigError(msg)
-    setting = new_value
-    if old_explicit and not new_explicit:
-        setting = old_value
+    setting = old_value if old_explicit and not new_explicit else new_value
+    if old_explicit:
+        # Fires whenever the old key is WRITTEN, including when it is written
+        # beside the new one or set to the default value — those are the two
+        # states the migration actually passes through, and they are exactly
+        # where the nudge to delete the line is worth having.
         msg = (
             "sphinx-mounts: `mounts_from_toml` is deprecated; rename it to "
             "`sources_from_toml`. Nothing else changes — the same file is "
@@ -618,6 +632,27 @@ def _resolve_toml_setting(app: Sphinx, config: Config) -> str | None:
         log_warning(logger, msg, "deprecated_confval")
     setattr(app, _TOML_SETTING_KEY, (setting,))
     return setting
+
+
+def _is_explicit(config: Config, name: str) -> bool:
+    """Whether ``name`` was WRITTEN, in ``conf.py`` or on the command line.
+
+    Sphinx carries both halves: ``config._raw_config`` is the namespace
+    ``conf.py`` produced, and ``config.overrides`` is what ``-D`` supplied.
+    Their union is the real question, and it is the only one that separates
+    "the author named the default" from "the author said nothing" — a
+    distinction the value cannot express and which decides which file is read.
+
+    Both attributes exist across the supported range (verified on 7.4.7 and
+    9.1.0). If a future Sphinx drops either, the fallback is the old
+    value-based inference, which is wrong only in the corners named in
+    :func:`_resolve_toml_setting` and never crashes.
+    """
+    raw = getattr(config, "_raw_config", None)
+    overrides = getattr(config, "overrides", None)
+    if raw is None and overrides is None:  # pragma: no cover - not on 7.4-9.x
+        return getattr(config, name, DEFAULT_TOML_FILENAME) != DEFAULT_TOML_FILENAME
+    return name in (raw or {}) or name in (overrides or {})
 
 
 @dataclass(frozen=True, slots=True)
@@ -927,7 +962,7 @@ def _resolve_variant_map(
         inline = spec.variant_data
         file_ref = spec.variant_data_file
     try:
-        return resolve_variant_data(inline, file_ref)
+        resolved = resolve_variant_data(inline, file_ref)
     except VariantDataError as exc:
         if present:
             logger.info(
@@ -944,6 +979,49 @@ def _resolve_variant_map(
             f"report this. [mounts.variant_data_unreadable]"
         )
         raise VariantRuleError(msg) from exc
+    _guard_mispointed_needs(spec, present=present, resolved=resolved)
+    return resolved
+
+
+def _guard_mispointed_needs(
+    spec: VariantSourcesConfig, *, present: bool, resolved: dict[str, Any]
+) -> None:
+    """Refuse a project whose variant data is declared but never read.
+
+    The conjunction is deliberately narrow, and every conjunct is statically
+    knowable at this point: rules are declared, sphinx-needs is **present** (so
+    its resolved map is what this reader must agree with), the TOML **declares**
+    variant data, and that map came out **empty**. There is only one way to be
+    in all four states at once — sphinx-needs was never pointed at this file —
+    and the consequence is that every rule reports an unknown key and excludes,
+    so the project silently loses every gated file.
+
+    It used to ride a *suppressible* ``mounts.variant_rule_unevaluable``
+    warning per rule. That contradicts this key's own rule, argued in three
+    other places here: for a gating key, a failure behind a diagnostic a
+    project can silence is not a failure. ``suppress_warnings = ["mounts"]`` is
+    itself recommended in these docs as the "quiet this extension" switch, and
+    with it set the loss was completely silent.
+
+    A project that legitimately supplies the map from ``conf.py`` or ``-D``
+    cannot reach this: its resolved map is not empty.
+    """
+    declares = spec.variant_data is not None or spec.variant_data_file is not None
+    if not (present and declares and not resolved):
+        return
+    msg = (
+        f"sphinx-mounts: `{spec.toml_path}` declares `[needs] variant_data` "
+        f"and `[[source.variant_sources]]`, but sphinx-needs resolved an EMPTY "
+        f"variant map — so it was never pointed at this file, and every rule "
+        f"would report an unknown key and exclude its files. The whole gated "
+        f"document set would silently disappear.\n"
+        f"Point sphinx-needs at the same file, in conf.py:\n"
+        f'    needs_from_toml = "{spec.toml_path.name}"\n'
+        f"This reader deliberately takes the map FROM sphinx-needs whenever it "
+        f"is installed, so that the two tools cannot disagree about which "
+        f"documents exist. [mounts.variant_data_unreadable]"
+    )
+    raise VariantRuleError(msg)
 
 
 def _anchor_data_file(raw: Any, confdir: Path) -> Path | None:

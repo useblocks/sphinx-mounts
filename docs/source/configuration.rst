@@ -1159,13 +1159,19 @@ documents exist.
 
    The reader takes the map from Sphinx-Needs whenever Sphinx-Needs is
    **installed**, so that the two tools cannot disagree — the TOML fallback
-   is for the case where nothing else computes one. One corner follows from
-   that: a project that installs Sphinx-Needs but does not point it at this
-   file (no ``needs_from_toml``) leaves the map empty, so every ``var.*``
-   reference is an unknown key and every rule reports
-   ``mounts.variant_rule_unevaluable`` and excludes. That is the fail-closed
-   direction and it is loud rather than silent, but the fix is to give
-   Sphinx-Needs the same file rather than to work around it here.
+   is for the case where nothing else computes one.
+
+   A project that installs Sphinx-Needs but never points it at this file (no
+   ``needs_from_toml``) is therefore **refused**, not merely warned about: the
+   map would be empty, every rule would report an unknown key and exclude, and
+   the whole gated document set would disappear. The message names the
+   one-line fix. A project that supplies the map from ``conf.py`` or ``-D``
+   instead is unaffected — its map is not empty.
+
+   The sibling corner has no diagnostic and is worth knowing about:
+   :ref:`sources-from-toml` and ``needs_from_toml`` may point at **different
+   files**, in which case the rules come from one and the variant map from the
+   other. Point both at the same file unless you mean otherwise.
 
 **Two anchors, and they are different on purpose.** A relative
 ``variant_data_file``:

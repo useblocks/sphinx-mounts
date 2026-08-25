@@ -52,7 +52,10 @@ Unreleased
   in the build, including the files its valid patterns name. A rule that is
   false for this variant and would remove ``root_doc`` is refused too, so
   Sphinx's own "unable to load the master document" abort — which blames the
-  source directory for an exclusion — is never reachable through a rule.
+  source directory for an exclusion — is not reachable through a rule that
+  names a host document, whatever suffix it carries. (A root document provided
+  by a *mount* is not covered: the guard runs at configuration time and cannot
+  know what a mount will produce.)
 
   See :ref:`variant-sources`, and in particular the **stale-output caveat**:
   Sphinx does not delete output for documents that have left the build, so
@@ -81,7 +84,10 @@ Unreleased
    shape. It is a downgrade rather than a suppression — the record is still
    printed, because it is the only place left where a rule that removed more
    than you meant is visible — and it is exact: a reference to a document **no
-   rule mentions** still warns and still fails ``-W``.
+   rule mentions** still warns and still fails ``-W``. "Exact" means the
+   attributed set is rebuilt with the same inputs and the same post-filters
+   Sphinx's own discovery uses, including the builder's asset paths, so a name
+   that was never a document in any variant cannot get into it.
 
 .. warning::
 
