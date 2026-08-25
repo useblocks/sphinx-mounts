@@ -114,15 +114,20 @@ def test_the_expansion_cap_is_where_it_is_for_a_measured_reason() -> None:
     validation measured that setting the constant to ``10**6`` left the whole
     suite green.
     """
-    at_the_cap = "**/" * MAX_ZERO_WIDENING + "x.rst"
-    assert refuse(at_the_cap) is None
-    assert refuse("**/" * (MAX_ZERO_WIDENING + 1) + "x.rst") is not None
+    # The boundary is written as a LITERAL, deliberately. Expressing it as
+    # `"**/" * MAX_ZERO_WIDENING` would make the test move with the constant
+    # and pass for any value of it — which is precisely the mutation this test
+    # has to fail: validation set the constant to 10**6 and the whole suite
+    # stayed green.
+    assert MAX_ZERO_WIDENING == 6, "the number itself is the contract"
+    assert refuse("**/" * 6 + "x.rst") is None
+    assert refuse("**/" * 7 + "x.rst") is not None
 
     # The doubling is only visible when the wildcards are separated by literal
     # segments; adjacent ones collapse to the same string and are deduplicated,
     # which is why the cap counts WILDCARDS rather than emitted patterns.
     assert len(to_exclude_patterns("a/**/b/**/c/**/d.rst")) == 2**3
-    assert len(to_exclude_patterns(at_the_cap)) == MAX_ZERO_WIDENING + 1
+    assert len(to_exclude_patterns("**/" * 6 + "x.rst")) == 7
 
 
 # ---------------------------------------------------------------------------
