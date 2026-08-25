@@ -341,6 +341,45 @@ def _flip(confdir: Path, before: str, after: str) -> None:
     )
 
 
+MOUNT_ONLY_TOML = """
+[[source.mounts]]
+dir = "{bundle}"
+mount_at = "mnt"
+
+[[source.variant_sources]]
+if = "var.edition == 'pro'"
+files = ["binternal.rst"]
+
+[needs.variant_data]
+edition = "EDITION"
+"""
+
+
+def test_a_mount_only_flip_converges(make_app, tmp_path):
+    """``config.mounts`` alone is enough to invalidate the environment.
+
+    Isolated from the host arm on purpose: with no ``exclude_patterns`` entry
+    changing, the only thing that differs across the flip is the mounts config
+    value. If the mount arm stopped folding into that value — a post-walk
+    filter, or a fold that mutates a copy and never reassigns — the value would
+    be byte-identical across the flip, nothing would invalidate, and the second
+    build would still hold the gated document.
+    """
+    confdir, _ = make_project(tmp_path, toml=MOUNT_ONLY_TOML.replace("EDITION", "pro"))
+    builddir = tmp_path / "build"
+    first = _build(make_app, confdir, builddir=builddir)
+    assert "mnt/binternal" in first.env.found_docs
+
+    _flip(confdir, "pro", "basic")
+    second = _build(make_app, confdir, builddir=builddir, freshenv=False)
+    assert "mnt/binternal" not in second.env.found_docs
+    assert "mnt/index" in second.env.found_docs
+
+    _flip(confdir, "basic", "pro")
+    third = _build(make_app, confdir, builddir=builddir, freshenv=False)
+    assert "mnt/binternal" in third.env.found_docs
+
+
 def test_the_stale_output_caveat_is_real(make_app, tmp_path):
     """The gated page stays on disk after a flip, live and URL-reachable.
 
@@ -756,23 +795,28 @@ def setup(app):
 """
 
 
-def _stub_conf(confdir: Path, inline: str, file_ref: str) -> None:
+def _stub_conf(confdir: Path, module: str, inline: str, file_ref: str) -> None:
     """Register the two sphinx-needs confvals without sphinx-needs.
 
     Simulating the confvals directly is what makes all three cells of the
     matrix reachable deterministically: which cell a real sphinx-needs puts a
-    project in depends on which release is installed, and the point of the
-    unconditional re-merge is that the reader does not have to know.
+    project in depends on which release is installed, and the whole point of
+    the unconditional re-merge is that the reader does not have to know.
+
+    ``module`` must be unique per test. ``sys.modules`` is process-global and
+    survives a ``SphinxTestApp``'s ``sys.path`` restore, so two tests sharing a
+    stub name would silently share the first one's confval defaults — and the
+    second test would then pass or fail for the wrong reason.
     """
     _write(
-        confdir / "needs_stub.py", NEEDS_STUB.format(inline=inline, file_ref=file_ref)
+        confdir / f"{module}.py", NEEDS_STUB.format(inline=inline, file_ref=file_ref)
     )
     conf = confdir / "conf.py"
     conf.write_text(
         conf.read_text(encoding="utf-8").replace(
             'extensions = ["sphinx_mounts"]',
             "import os, sys; sys.path.insert(0, os.path.dirname(__file__))\n"
-            'extensions = ["needs_stub", "sphinx_mounts"]',
+            f'extensions = ["{module}", "sphinx_mounts"]',
         ),
         encoding="utf-8",
     )
@@ -816,7 +860,12 @@ def test_the_file_side_survives_an_unmerged_inline_map(make_app, tmp_path):
     (confdir / "variants.json").write_text(
         json.dumps({"edition": "basic", "build": {"debug": True}}), encoding="utf-8"
     )
-    _stub_conf(confdir, inline='{"edition": "pro"}', file_ref='"variants.json"')
+    _stub_conf(
+        confdir,
+        "needs_stub_unmerged",
+        inline='{"edition": "pro"}',
+        file_ref='"variants.json"',
+    )
     app = _build(make_app, confdir)
     assert "mounts.variant_rule_unevaluable" not in app._warning.getvalue()
     assert "hostgated.html" in _pages(app)
@@ -835,6 +884,7 @@ def test_the_merge_is_a_no_op_on_an_already_merged_map(make_app, tmp_path):
     )
     _stub_conf(
         confdir,
+        "needs_stub_merged",
         inline='{"edition": "pro", "build": {"debug": True}}',
         file_ref='"variants.json"',
     )
