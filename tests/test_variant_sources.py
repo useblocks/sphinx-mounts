@@ -730,13 +730,12 @@ def test_a_non_ascii_docname_is_attributed(make_app, tmp_path):
     reader slicing a raw path would key the attribution set in NFD while
     ``found_docs`` holds NFC, and the downgrade would miss.
 
-    Measured on Sphinx 7.4.7 and 9.1.0: ``get_matching_files`` already
-    NFC-normalises every entry it yields, so the host arm's derivation receives
-    NFC and cannot drift. (The mount arm derives docnames from the walker's raw
-    path on both sides — the attribution and ``mounter.py`` — so those agree
-    with each other too.) This test is the fence for that, since it is a
-    property of Sphinx that could change under us rather than one this
-    extension controls.
+    The earlier form of this docstring claimed ``get_matching_files`` already
+    NFC-normalises every entry it yields — measured on macOS only, and CI on
+    Linux proved it false there: the raw NFD filename reached the attribution
+    set while the warning's docname was NFC, and the downgrade missed. The
+    normalisation is therefore OURS (``_docname_for`` NFC-normalises), and this
+    test is the cross-platform fence for it.
     """
     toml = """
     [[source.variant_sources]]

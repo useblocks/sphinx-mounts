@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 from docutils import nodes
 from sphinx import addnodes
@@ -1561,11 +1562,21 @@ def _walked_relatives(gated: _GatedMount, excludes: tuple[str, ...]) -> set[str]
 
 
 def _docname_for(relative: str, suffixes: tuple[str, ...]) -> str | None:
-    """Strip the first matching registered suffix, as Sphinx core does."""
+    """Strip the first matching registered suffix, as Sphinx core does.
+
+    NFC-normalised, because Sphinx's ``found_docs`` is: ``Project.discover``
+    runs every docname through ``path_stabilize``. The attribution diff's own
+    inputs are NOT reliably NFC — on Linux ``get_matching_files`` yields the
+    filename's literal bytes, so an NFD-named file (the form macOS filesystems
+    hand out, and what a checkout made there can carry) keys the attribution
+    set in NFD while the toctree warning's docname is NFC, and the downgrade
+    silently misses. CI on Linux caught exactly that; the macOS measurement
+    alone had suggested the normalisation came for free.
+    """
     suffix = _match_suffix(relative, suffixes)
     if suffix is None or len(suffix) >= len(relative):
         return None
-    return relative[: -len(suffix)]
+    return unicodedata.normalize("NFC", relative[: -len(suffix)])
 
 
 def setup(app: Sphinx) -> dict[str, Any]:
