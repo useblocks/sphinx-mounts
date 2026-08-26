@@ -1412,7 +1412,9 @@ def test_a_prepending_handler_does_not_over_report_a_decided_gate(make_app, tmp_
     confdir, _ = make_project(
         tmp_path,
         toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
-        conf_extra=PREPENDING_HANDLER_CONF.format(rival=(tmp_path / "rival")),
+        conf_extra=PREPENDING_HANDLER_CONF.format(
+            rival=(tmp_path / "rival").as_posix()
+        ),
     )
     app = _build(make_app, confdir)
     warning = app._warning.getvalue()
@@ -1432,7 +1434,9 @@ def test_a_prepending_handler_keeps_the_gates_attribution(make_app, tmp_path):
     confdir, _ = make_project(
         tmp_path,
         toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
-        conf_extra=PREPENDING_HANDLER_CONF.format(rival=(tmp_path / "rival")),
+        conf_extra=PREPENDING_HANDLER_CONF.format(
+            rival=(tmp_path / "rival").as_posix()
+        ),
         host_entries=("mnt/index", "riv/index"),
     )
     attributed: dict[str, str] = {}
@@ -1584,7 +1588,7 @@ def test_a_live_gates_condition_does_not_shelter_an_unevaluated_twin(
             "def _append(app, config):\n"
             "    config['mounts'] = [\n"
             "        *config['mounts'],\n"
-            f'        {{"dir": "{tmp_path / "rival"}", "mount_at": "riv", '
+            f'        {{"dir": "{(tmp_path / "rival").as_posix()}", "mount_at": "riv", '
             '"if": "var.edition == \'pro\'"},\n'
             "    ]\n"
             "\n"
@@ -1626,7 +1630,7 @@ def test_an_undecided_gate_still_gets_its_toctree_downgrade(make_app, tmp_path):
             "def _append(app, config):\n"
             "    config['mounts'] = [\n"
             "        *config['mounts'],\n"
-            f'        {{"dir": "{tmp_path / "rival"}", "mount_at": "riv", '
+            f'        {{"dir": "{(tmp_path / "rival").as_posix()}", "mount_at": "riv", '
             '"if": "var.edition == \'enterprise\'"},\n'
             "    ]\n"
             "\n"
@@ -1667,7 +1671,7 @@ def test_a_duplicate_condition_costs_only_the_note(make_app, tmp_path):
         conf_extra=(
             "def _prepend(app, config):\n"
             "    config['mounts'] = [\n"
-            f'        {{"dir": "{tmp_path / "rival"}", "mount_at": "riv", '
+            f'        {{"dir": "{(tmp_path / "rival").as_posix()}", "mount_at": "riv", '
             '"if": "var.edition == \'pro\'"},\n'
             "        *config['mounts'],\n"
             "    ]\n"
