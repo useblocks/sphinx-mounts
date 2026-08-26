@@ -1552,3 +1552,42 @@ def test_a_gated_mount_that_attributes_its_pages_still_promises_the_downgrade(
     status = app._status.getvalue()
     assert "are downgraded" in status, status
     assert "Attribution suppressed" not in status
+
+
+def test_a_live_gates_condition_does_not_shelter_an_unevaluated_twin(
+    make_app, tmp_path
+):
+    """Only the gated-OFF gates go into the decided multiset, and here is why.
+
+    The reader evaluates ``var.edition == 'pro'`` to TRUE and strips the key,
+    so that mount reaches the parser carrying no gate at all and matches
+    nothing. A handler at 460 then appends a mount whose ``if`` is the *same
+    string*. Nothing evaluated that one, so it must be gated off and said so.
+
+    Recording every gate the reader saw — rather than only the ones it gated —
+    leaves a spare entry in the multiset with no mount to claim it, and the
+    interloper consumes it instead. The bundle then disappears in silence,
+    which is the single way an unevaluated gate could still slip past the seam
+    that exists to catch it.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "pro"),
+        conf_extra=(
+            "def _append(app, config):\n"
+            "    config['mounts'] = [\n"
+            "        *config['mounts'],\n"
+            f'        {{"dir": "{tmp_path / "rival"}", "mount_at": "riv", '
+            '"if": "var.edition == \'pro\'"},\n'
+            "    ]\n"
+            "\n"
+            "def setup(app):\n"
+            "    app.connect('config-inited', _append, priority=460)\n"
+        ),
+    )
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "mnt/index" in app.env.found_docs, "the reader's own mount is live"
+    assert "riv/index" not in app.env.found_docs, "the interloper is gated"
+    assert "mount_gate_unevaluable" in warning, warning
+    assert "[[source.mounts]][1]" in warning, warning
