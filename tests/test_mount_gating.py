@@ -20,6 +20,7 @@ what the reader computed.
 
 from __future__ import annotations
 
+import logging as stdlib_logging
 from pathlib import Path
 import textwrap
 from typing import Any
@@ -64,6 +65,8 @@ def make_project(
     conf_extra: str = "",
     srcdir_name: str | None = None,
     host_entries: tuple[str, ...] = (),
+    host_glob: str | None = None,
+    host_files: dict[str, str] | None = None,
 ) -> tuple[Path, Path]:
     """Materialise a host project plus two external bundles.
 
@@ -73,14 +76,17 @@ def make_project(
     dangling reference confusing the picture — a reference INTO a gated bundle
     is its own scenario, and the tests that want one ask for it.
 
-    ``{bundle}``, ``{loose}``, ``{alpha}`` and ``{beta}`` are substituted into
-    ``toml`` with absolute paths.
+    ``{bundle}``, ``{rival}``, ``{loose}``, ``{alpha}`` and ``{beta}`` are
+    substituted into ``toml`` with absolute paths. ``rival`` exists so that two
+    mounts can contest one ``mount_at``, which is the natural shape for this
+    key and the shape the attribution's ordering has to survive.
 
     :return: ``(confdir, bundle)``.
     """
     confdir = root / "proj"
     srcdir = confdir if srcdir_name is None else confdir / srcdir_name
     bundle = root / "bundle"
+    rival = root / "rival"
     loose = root / "loose"
 
     _write(
@@ -105,6 +111,15 @@ def make_project(
         BUNDLE_INTERNAL_MARKER
     """,
     )
+    _write(
+        rival / "index.rst",
+        """
+        Rival
+        =====
+
+        RIVAL_INDEX_MARKER
+    """,
+    )
     for name in ("alpha", "beta"):
         _write(
             loose / f"{name}.rst",
@@ -115,21 +130,20 @@ def make_project(
             {name.upper()}_MARKER
         """,
         )
+    for name, body in (host_files or {}).items():
+        _write(srcdir / name, body)
 
-    listed = "\n           ".join(host_entries) if host_entries else ""
-    _write(
-        srcdir / "index.rst",
-        f"""
-        Host
-        ====
-
-        HOST_MARKER
-
-        .. toctree::
-
-           {listed}
-    """,
-    )
+    # Assembled line by line rather than through a dedented template, for the
+    # reason the conf.py below spells out: an interpolated multi-line block
+    # would leave `textwrap.dedent` nothing in common to strip, and the whole
+    # document would keep its template indentation.
+    lines = ["Host", "====", "", "HOST_MARKER", "", ".. toctree::", ""]
+    lines += [f"   {entry}" for entry in host_entries]
+    lines.append("")
+    if host_glob:
+        lines += [".. toctree::", "   :glob:", "", f"   {host_glob}", ""]
+    srcdir.mkdir(parents=True, exist_ok=True)
+    (srcdir / "index.rst").write_text("\n".join(lines), encoding="utf-8")
     # Written line by line rather than through a dedented template: a
     # multi-line ``conf_extra`` interpolated into one would leave its
     # continuation lines un-indented, which makes `textwrap.dedent` a no-op and
@@ -152,6 +166,7 @@ def make_project(
     _write(
         confdir / "ubproject.toml",
         toml.replace("{bundle}", bundle.as_posix())
+        .replace("{rival}", rival.as_posix())
         .replace("{loose}", loose.as_posix())
         .replace("{alpha}", (loose / "alpha.rst").as_posix())
         .replace("{beta}", (loose / "beta.rst").as_posix()),
@@ -165,9 +180,25 @@ def _build(
     *,
     builddir: Path | None = None,
     freshenv: bool = True,
+    attribution: dict[str, str] | None = None,
     **kwargs: Any,
 ):
+    """Build the project, optionally snapshotting the downgrade attribution.
+
+    The downgrade filter lives on process-global loggers and is detached at
+    ``build-finished``, so a caller that looks at it after ``app.build()``
+    returns always sees an empty map — correctly, since a finished build no
+    longer owns those loggers. Passing ``attribution`` connects a listener at
+    priority 1, ahead of the extension's own detach at the default 500, and
+    fills the given dict with what the filter was holding.
+    """
     app = make_app(srcdir=confdir, builddir=builddir, freshenv=freshenv, **kwargs)
+    if attribution is not None:
+        app.connect(
+            "build-finished",
+            lambda *_: attribution.update(_attribution()),
+            priority=1,
+        )
     app.build()
     return app
 
@@ -185,6 +216,27 @@ def _fails_under_dash_w(make_app, confdir: Path, builddir: Path) -> bool:
     except Exception:
         return True
     return app.statuscode != 0
+
+    # Only ever used to assert that a build DOES fail. Constructing a second
+    # `SphinxTestApp` in one process re-registers the `sphinx.addnodes` node
+    # classes and emits an `app.add_node` warning for each, which under `-W`
+    # is enough to fail any second build — so "it passed -W" has to be
+    # asserted on a test's FIRST and only application, never through here.
+
+
+def _attribution() -> dict[str, str]:
+    """The docname -> gate/rule map the installed downgrade filter is holding.
+
+    Read off the emitting loggers rather than off the app, because that is
+    where the attribution actually lives and what the filter actually consults.
+    An empty map means no filter is installed, which is the correct state for a
+    build that excluded nothing.
+    """
+    for name in mount_warnings.FALLBACK_LOGGER_NAMES:
+        for installed in stdlib_logging.getLogger(name).filters:
+            if isinstance(installed, mount_warnings.DowngradeFilter):
+                return dict(installed._excluded)
+    return {}
 
 
 DIR_MOUNT_TOML = """
@@ -580,3 +632,266 @@ def test_a_gating_flip_converges_in_both_directions(make_app, tmp_path):
     )
     app = _build(make_app, confdir, builddir=builddir, freshenv=False)
     assert "mnt/index" in app.env.found_docs
+
+
+# ---------------------------------------------------------------------------
+# Attribution: which references into a gated bundle are downgraded, and why
+# the docnames come from the real pipeline rather than a second walk
+# ---------------------------------------------------------------------------
+
+
+def test_a_toctree_entry_into_a_gated_bundle_is_downgraded(make_app, tmp_path):
+    """A host index that lists every variant's pages is the normal 150% shape.
+
+    Sphinx is right that the document is missing; what is wrong is calling it a
+    problem. The record is reworded to name the gate, downgraded to INFO, and
+    ``-W`` passes.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        host_entries=("mnt/index",),
+    )
+    app = _build(make_app, confdir, warningiserror=True)
+    status = app._status.getvalue()
+    assert mount_warnings.VARIANT_EXCLUDED_CODE in status
+    assert "[[source.mounts]][0] (if = \"var.edition == 'pro'\")" in status
+    assert "WARNING" not in app._warning.getvalue()
+    assert app.statuscode == 0
+
+
+def test_the_attribution_covers_every_page_of_the_gated_bundle(make_app, tmp_path):
+    """Not just the entry doc: the whole bundle left, so all of it is attributed."""
+    confdir, _ = make_project(tmp_path, toml=DIR_MOUNT_TOML.replace("EDITION", "basic"))
+    attributed: dict[str, str] = {}
+    _build(make_app, confdir, attribution=attributed)
+    assert set(attributed) == {"mnt/index", "mnt/binternal"}
+
+
+def test_a_genuine_typo_still_warns_beside_a_gated_mount(make_app, tmp_path):
+    """The negative control, and the reason the downgrade must be exact.
+
+    A reference no gate and no rule explains still warns and still fails
+    ``-W``, so a typo cannot hide behind a variant.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        host_entries=("mnt/index", "nosuchdoc"),
+    )
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "nosuchdoc" in warning
+    assert "mnt/index" not in warning
+    assert _fails_under_dash_w(make_app, confdir, tmp_path / "build")
+
+
+def test_a_glob_entry_matching_only_gated_pages_is_downgraded(make_app, tmp_path):
+    """The ``:glob:`` arm reaches a gated bundle the same way it reaches a rule."""
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        host_glob="mnt/*",
+    )
+    app = _build(make_app, confdir, warningiserror=True)
+    assert mount_warnings.VARIANT_EXCLUDED_CODE in app._status.getvalue()
+    assert "WARNING" not in app._warning.getvalue()
+    assert app.statuscode == 0
+
+
+def test_a_file_list_mount_gate_attributes_its_docnames(make_app, tmp_path):
+    """File-list mode has no walk to reproduce, and still goes through it."""
+    confdir, _ = make_project(
+        tmp_path,
+        toml=FILE_MOUNT_TOML.replace("EDITION", "basic"),
+        host_entries=("loose/alpha",),
+    )
+    attributed: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=attributed, warningiserror=True)
+    assert set(attributed) == {"loose/alpha", "loose/beta"}
+    assert mount_warnings.VARIANT_EXCLUDED_CODE in app._status.getvalue()
+    assert "WARNING" not in app._warning.getvalue()
+    assert app.statuscode == 0
+
+
+# ---------------------------------------------------------------------------
+# The phantom hazard: an attributed docname that IS still walkable would
+# silently disable a genuine `-W` failure
+# ---------------------------------------------------------------------------
+
+
+TWO_MOUNTS_TOML = """
+[[source.mounts]]
+dir = "{bundle}"
+mount_at = "mnt"
+if = "var.edition == 'pro'"
+
+[[source.mounts]]
+dir = "{rival}"
+mount_at = "mnt"
+if = "var.edition == 'basic'"
+
+[needs.variant_data]
+edition = "basic"
+"""
+
+
+def test_a_docname_a_live_mount_still_supplies_is_not_attributed(make_app, tmp_path):
+    """Two mounts, one ``mount_at``, mutually exclusive conditions.
+
+    This is the shape the key is *for* — the pro bundle and the basic bundle
+    both live at ``guides`` and exactly one of them is built. ``mnt/index``
+    exists in this variant, supplied by the mount that is live, so a reference
+    to it is an ordinary resolved reference and must not be downgraded.
+
+    Attributing it would be a phantom, and a phantom is not merely a wrong
+    message: the filter downgrades every toctree record naming an attributed
+    docname, so a **genuine** warning about that name would be silenced and
+    ``-W`` would stop failing. The gated pass runs after every live mount has
+    registered precisely so that this cannot happen.
+    """
+    confdir, _ = make_project(
+        tmp_path, toml=TWO_MOUNTS_TOML, host_entries=("mnt/index",)
+    )
+    attributed: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=attributed, warningiserror=True)
+    assert "mnt/index" in app.env.found_docs
+    assert "mnt/index" not in attributed
+    assert "WARNING" not in app._warning.getvalue()
+    assert app.statuscode == 0
+    # And the gated mount attributes NOTHING, not merely "not `mnt/index`".
+    # The contested docname triggers the same whole-mount skip the live path
+    # applies, so the reduction reaches its sibling `mnt/binternal` too. That
+    # is deliberate: whether the gated mount would have supplied that page in
+    # the variant where it is live depends on which mounts are live THERE,
+    # which this build cannot know. Under-attributing costs a genuine warning
+    # on a reference nobody writes; over-attributing costs a phantom, and a
+    # phantom silences a real one.
+    assert attributed == {}
+
+
+def test_a_docname_the_host_supplies_is_not_attributed(make_app, tmp_path):
+    """Host precedence is one of the reductions ``discover`` applies.
+
+    The host's own ``mnt/index.rst`` wins over any mount, so the docname is
+    alive in both variants and a reference to it is never variant-excluded.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        host_entries=("mnt/index",),
+        host_files={
+            "mnt/index.rst": "Host mnt\n========\n\nHOST_MNT_MARKER\n",
+        },
+    )
+    attributed: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=attributed, warningiserror=True)
+    assert "mnt/index" in app.env.found_docs
+    assert "mnt/index" not in attributed
+    assert "WARNING" not in app._warning.getvalue()
+    assert app.statuscode == 0
+
+
+def test_a_gated_mount_with_an_absent_root_attributes_nothing_and_says_nothing(
+    make_app, tmp_path
+):
+    """An absent bundle root is not a problem for a mount that is gated off.
+
+    ``mounts.missing_path`` is a warning, so reporting it would fail ``-W`` on
+    a project that gated a bundle its CI has not checked out — which is one of
+    the reasons to gate a bundle in the first place. The whole-mount skip still
+    happens, so nothing is attributed either.
+    """
+    toml = DIR_MOUNT_TOML.replace('dir = "{bundle}"', 'dir = "{bundle}-gone"')
+    confdir, _ = make_project(tmp_path, toml=toml.replace("EDITION", "basic"))
+    attributed: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=attributed)
+    assert "missing_path" not in app._warning.getvalue()
+    assert attributed == {}
+
+
+def test_gated_docnames_never_reach_the_wiring_dictionary(make_app, tmp_path):
+    """The separate dictionary is load-bearing, not tidiness.
+
+    ``_wired_entries`` reads ``_mount_entry_docnames`` as "what this mount
+    produced" and wires ``attach_to`` from it. Publishing a gated mount's
+    docnames there would wire a toctree entry no document backs — an
+    un-suppressible ``toc.not_readable``, i.e. the mount modifying the host
+    project while not being in the build at all.
+    """
+    confdir, _ = make_project(tmp_path, toml=DIR_MOUNT_TOML.replace("EDITION", "basic"))
+    app = _build(make_app, confdir)
+    project = app.env.project
+    assert project._mount_entry_docnames == {0: []}
+    assert project._gated_entry_docnames == {0: ["mnt/binternal", "mnt/index"]}
+
+
+def test_the_gated_docnames_stay_out_of_the_pickled_environment(make_app, tmp_path):
+    """``__getstate__`` clears the new field like the three beside it.
+
+    Nothing reads it back — ``discover()`` rebuilds it every build — so
+    pickling it would be cache weight plus a version coupling, and the mount
+    state this extension deliberately keeps out of every user's ``.doctrees``
+    would be back.
+    """
+    confdir, _ = make_project(tmp_path, toml=DIR_MOUNT_TOML.replace("EDITION", "basic"))
+    app = _build(make_app, confdir)
+    assert app.env.project.__getstate__()["_gated_entry_docnames"] == {}
+
+
+@pytest.mark.parametrize("edition", ["pro", "basic"])
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_dash_w_passes_in_both_variants_serially_and_in_parallel(
+    make_app, tmp_path, edition, jobs
+):
+    """The four-cell matrix a variant CI actually runs.
+
+    The downgrade is installed on process-global loggers at
+    ``env-before-read-docs``; ``sphinx-build -j`` reads documents in worker
+    processes and sends their records back, which is a different path through
+    the same filter. Both verdicts have to be clean in both.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", edition),
+        host_entries=("mnt/index",),
+    )
+    assert not _fails_under_dash_w_parallel(make_app, confdir, tmp_path / "build", jobs)
+
+
+def _fails_under_dash_w_parallel(make_app, confdir: Path, builddir: Path, jobs: int):
+    try:
+        app = _build(
+            make_app,
+            confdir,
+            warningiserror=True,
+            builddir=builddir,
+            parallel=jobs,
+        )
+    except Exception:
+        return True
+    return app.statuscode != 0
+
+
+def test_the_attribution_is_recomputed_for_a_second_build_of_one_application(
+    make_app, tmp_path
+):
+    """Per BUILD, not per construction.
+
+    ``Sphinx.build()`` may be called more than once on one application, and the
+    filter comes off at ``build-finished``. A second build that ran unfiltered
+    would emit the variant-excluded record un-downgraded and fail ``-W`` on a
+    correctly gated project.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        host_entries=("mnt/index",),
+    )
+    first: dict[str, str] = {}
+    second: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=first)
+    assert set(first) == {"mnt/index", "mnt/binternal"}
+    app.connect("build-finished", lambda *_: second.update(_attribution()), priority=1)
+    app.build()
+    assert set(second) == {"mnt/index", "mnt/binternal"}

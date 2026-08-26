@@ -1646,17 +1646,25 @@ def _on_install_variant_filter(app: Sphinx, _env: Any, _docnames: list[str]) -> 
         return
     cached = getattr(app, _VARIANT_ATTRIBUTION_KEY, None)
     if cached is not None and cached[0] is state:
-        excluded = dict(cached[1])
+        walked = cached[1]
     else:
         suffixes = tuple(app.project.source_suffix)
         # Both walks are keyed on the rule arm, and a project that only gates
         # mounts has neither. The `[0]` fallbacks inside them would be an
         # IndexError rather than a missing attribution.
-        excluded = (
+        walked = (
             _host_excluded_docnames(app, state, suffixes) if state.host_patterns else {}
         )
-        excluded.update(_mount_excluded_docnames(state, suffixes))
-        setattr(app, _VARIANT_ATTRIBUTION_KEY, (state, excluded))
+        walked.update(_mount_excluded_docnames(state, suffixes))
+        setattr(app, _VARIANT_ATTRIBUTION_KEY, (state, walked))
+    # Outside the cache, and on a copy. The two halves above are extra IO and
+    # are pure functions of the fold's state, so reusing them across builds of
+    # one application is both worthwhile and safe. The gated-mount half is
+    # neither: `discover()` recomputes it every build for free, and caching a
+    # snapshot of it would go stale the moment a bundle's file set changed
+    # under a long-lived application (sphinx-autobuild, a multi-build script).
+    excluded = dict(walked)
+    excluded.update(_gated_mount_docnames(app, state))
     if not excluded:
         mount_warnings.remove_downgrade_filters()
         return
@@ -1676,6 +1684,40 @@ def _on_install_variant_filter(app: Sphinx, _env: Any, _docnames: list[str]) -> 
         len(excluded),
         list(names),
     )
+
+
+def _gated_mount_docnames(app: Sphinx, state: _VariantState) -> dict[str, str]:
+    """Docnames a gated-off mount would have provided, each mapped to its gate.
+
+    Read straight off ``discover()``'s own second pass rather than recomputed
+    here, and that is the whole design. The host arm and the rule-narrowed
+    mount arm both work by DIFFING two walks, and the diff is what cancels
+    their approximations: a docname that both walks produce is not excluded, so
+    an approximation that invents one on the "before" side invents it on the
+    "after" side too and drops out.
+
+    A whole-mount gate has no "after" — the mount produces nothing — so there
+    is no diff and nothing cancels. Every reduction ``discover`` applies would
+    have to be reproduced exactly by a second implementation, and each one
+    missed invents a docname that was never a document. One such phantom
+    downgrades a **genuine** toctree warning and stops ``-W`` from failing,
+    which is the one thing the downgrade must never do. So the real pipeline
+    runs for a gated mount and publishes into
+    ``_MountAwareProject._gated_entry_docnames``; this function only reads it.
+
+    ``setdefault`` rather than assignment, so that when two gated mounts would
+    both have supplied a docname the lower-numbered one owns the attribution.
+    The document is genuinely absent either way, so only the label is at stake
+    — but an arbitrary label would make the message depend on iteration order.
+    """
+    produced: dict[int, list[str]] = getattr(
+        getattr(app, "project", None), "_gated_entry_docnames", {}
+    )
+    excluded: dict[str, str] = {}
+    for index, label in state.mount_gates:
+        for docname in produced.get(index, ()):
+            excluded.setdefault(docname, label)
+    return excluded
 
 
 def _on_remove_variant_filter(_app: Sphinx, _exception: Exception | None) -> None:
