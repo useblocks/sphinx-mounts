@@ -618,6 +618,7 @@ def test_a_gating_flip_converges_in_both_directions(make_app, tmp_path):
 
     app = _build(make_app, confdir, builddir=builddir)
     assert "mnt/index" in app.env.found_docs
+    assert app.env.toctree_includes["index"] == ["mnt/index"]
 
     toml_path.write_text(
         toml_path.read_text().replace('edition = "pro"', 'edition = "basic"'),
@@ -625,6 +626,11 @@ def test_a_gating_flip_converges_in_both_directions(make_app, tmp_path):
     )
     app = _build(make_app, confdir, builddir=builddir, freshenv=False)
     assert "mnt/index" not in app.env.found_docs
+    assert app.env.toctree_includes.get("index", []) == []
+    # Named, not merely observed: the flip has to travel as a change to the
+    # `mounts` config VALUE. Anything else would leave both builds' values
+    # byte-identical and need an invalidation story this reader does not have.
+    assert "config changed ('mounts')" in app._status.getvalue()
 
     toml_path.write_text(
         toml_path.read_text().replace('edition = "basic"', 'edition = "pro"'),
@@ -632,6 +638,8 @@ def test_a_gating_flip_converges_in_both_directions(make_app, tmp_path):
     )
     app = _build(make_app, confdir, builddir=builddir, freshenv=False)
     assert "mnt/index" in app.env.found_docs
+    assert app.env.toctree_includes["index"] == ["mnt/index"]
+    assert "config changed ('mounts')" in app._status.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -895,3 +903,124 @@ def test_the_attribution_is_recomputed_for_a_second_build_of_one_application(
     app.connect("build-finished", lambda *_: second.update(_attribution()), priority=1)
     app.build()
     assert set(second) == {"mnt/index", "mnt/binternal"}
+
+
+def _inject_into_the_filter(app, docname: str, label: str) -> None:
+    """Add ``docname`` to whatever downgrade filter this build installed.
+
+    Connected at ``env-before-read-docs`` with a priority above the
+    extension's own, so it runs after the filter exists and before any
+    document — and therefore any toctree warning — is read.
+    """
+
+    def _hook(*_args):
+        for name in mount_warnings.FALLBACK_LOGGER_NAMES:
+            for installed in stdlib_logging.getLogger(name).filters:
+                if isinstance(installed, mount_warnings.DowngradeFilter):
+                    installed._excluded[docname] = label
+                    installed._docnames = sorted(installed._excluded)
+
+    app.connect("env-before-read-docs", _hook, priority=900)
+
+
+def test_a_phantom_in_the_attributed_set_silences_a_genuine_warning(make_app, tmp_path):
+    """The hazard, constructed — so the invariant below reads as load-bearing.
+
+    This does not test product behaviour. It INJECTS a docname the project
+    never had into the installed filter and shows what follows: a reference to
+    ``nosuchdoc`` is a genuine, un-attributable typo, and with the phantom in
+    place it is reworded as "this variant excludes it", downgraded to INFO, and
+    ``sphinx-build -W`` passes.
+
+    That is the whole reason a gated mount's docnames come from the real
+    per-mount pipeline rather than a cheaper second walk. There is no diff to
+    cancel a mistake here: any reduction the attribution failed to reproduce
+    would put a name like this one into the set, and nothing downstream would
+    ever say so.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        host_entries=("nosuchdoc",),
+    )
+    app = make_app(srcdir=confdir, freshenv=True, warningiserror=True)
+    _inject_into_the_filter(app, "nosuchdoc", "[[source.mounts]][0] (if = 'x')")
+    app.build()
+    assert mount_warnings.VARIANT_EXCLUDED_CODE in app._status.getvalue()
+    assert "nosuchdoc" not in app._warning.getvalue()
+    assert app.statuscode == 0
+
+
+BOTH_KEYS_TOML = """
+[[source.mounts]]
+dir = "{bundle}"
+mount_at = "mnt"
+if = "var.edition == 'pro'"
+
+[[source.mounts]]
+dir = "{rival}"
+mount_at = "mnt"
+if = "var.edition == 'basic'"
+
+[[source.mounts]]
+files = ["{alpha}", "{beta}"]
+mount_at = "loose"
+if = "var.edition == 'pro'"
+
+[[source.variant_sources]]
+if = "var.edition == 'pro'"
+files = ["hostgated.rst"]
+
+[needs.variant_data]
+edition = "basic"
+"""
+
+
+def test_nothing_in_the_attributed_set_is_in_the_build(make_app, tmp_path):
+    """The invariant every phantom violates, asserted directly.
+
+    Over a project that exercises all four attribution paths at once: a host
+    file removed by a rule, a directory mount gated off, a file-list mount
+    gated off, and a live mount contesting the gated one's ``mount_at``.
+
+    A name in this set is a name the downgrade filter will silence a warning
+    about, so a name that is also in ``found_docs`` is a live document whose
+    every future warning is pre-silenced. Nothing today emits such a warning,
+    which is exactly why it has to be fenced here rather than left to a build
+    outcome: the defect would be latent, not visible.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=BOTH_KEYS_TOML,
+        host_entries=("hostkeep",),
+        host_files={
+            "hostgated.rst": "Host gated\n==========\n\nHOSTGATED_MARKER\n",
+            "hostkeep.rst": "Host keep\n=========\n\nHOSTKEEP_MARKER\n",
+        },
+    )
+    attributed: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=attributed)
+    assert attributed, "the project really does exclude something"
+    assert set(attributed) & app.env.found_docs == set()
+
+
+def test_the_two_keys_attribute_side_by_side(make_app, tmp_path):
+    """A rule label and a gate label in one build, each naming its own key.
+
+    Before this key existed the message hard-coded one table name. Two
+    exclusions from two keys in one project is where a single hard-coded
+    subject would name the table the user did not write.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=BOTH_KEYS_TOML,
+        host_entries=("hostkeep",),
+        host_files={
+            "hostgated.rst": "Host gated\n==========\n\nHOSTGATED_MARKER\n",
+            "hostkeep.rst": "Host keep\n=========\n\nHOSTKEEP_MARKER\n",
+        },
+    )
+    attributed: dict[str, str] = {}
+    _build(make_app, confdir, attribution=attributed)
+    assert attributed["hostgated"].startswith("[[source.variant_sources]][0]")
+    assert attributed["loose/alpha"].startswith("[[source.mounts]][2]")
