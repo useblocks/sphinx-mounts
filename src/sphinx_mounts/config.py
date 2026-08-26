@@ -333,10 +333,16 @@ class MountConfig:
             # readable. That release is this one.
             #
             # `mapping-contract.md` §4 records the change and the reasoning.
+            # `MOUNT_CONDITION_KEY` is advertised but is NOT in `allowed`:
+            # it is a Python keyword, so no dataclass field can carry its name,
+            # and it is taken off the entry above rather than matched here.
+            # Leaving it out of the DISPLAY list told a user who typed `iff` to
+            # check their spelling against a list missing the key they meant.
+            advertised = sorted({*allowed, MOUNT_CONDITION_KEY})
             msg = (
                 f"sphinx-mounts: unknown mount key(s) {sorted(unknown)} on "
                 f"{_entry_label(entry)}; they are ignored. Supported keys are "
-                f"{sorted(allowed)}. A key another tool reads is not an error "
+                f"{advertised}. A key another tool reads is not an error "
                 f"here — but a misspelling is, so check the spelling if you "
                 f"expected this key to do something."
             )

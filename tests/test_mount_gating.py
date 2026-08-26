@@ -29,6 +29,7 @@ import pytest
 
 from sphinx_mounts import warnings as mount_warnings
 from sphinx_mounts.logging import MOUNT_GATED_CODE
+from tests.test_variant_sources import _stub_conf
 
 
 @pytest.fixture(autouse=True)
@@ -1024,3 +1025,325 @@ def test_the_two_keys_attribute_side_by_side(make_app, tmp_path):
     _build(make_app, confdir, attribution=attributed)
     assert attributed["hostgated"].startswith("[[source.variant_sources]][0]")
     assert attributed["loose/alpha"].startswith("[[source.mounts]][2]")
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: every route that gates is a route that reports
+# ---------------------------------------------------------------------------
+
+
+LATE_HANDLER_CONF = """
+def setup(app):
+    def _install_late(app, config):
+        config["mounts"] = [
+            {{"dir": "{bundle}", "mount_at": "mnt", "if": "var.edition == 'basic'"}}
+        ]
+
+    # 460 is inside the (450, 500) window: after the variant reader has run and
+    # before the parser turns the tables into MountConfigs.
+    app.connect("config-inited", _install_late, priority=460)
+"""
+
+
+def test_a_mount_installed_after_the_reader_is_gated_and_reported(make_app, tmp_path):
+    """The (450, 500) window: a gate nothing decided must not be a silent one.
+
+    A sibling extension or a monorepo ``conf.py`` that computes mounts at
+    ``config-inited`` is not exotic, and anything landing between the variant
+    reader at 450 and the parser at 500 produces a mount whose ``if`` the
+    reader never saw. The parser's fail-closed reading still gates it — note
+    the condition here is **true**, and the bundle goes anyway — so the only
+    question is whether the user is told.
+
+    Without the report this is exactly the "where did my 400 pages go" hazard
+    the ``mounts.mount_gated`` record exists to prevent, reachable through the
+    one door the reporter does not stand in front of.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml="[needs.variant_data]\nedition = 'basic'\n",
+        conf_extra=LATE_HANDLER_CONF.format(bundle=bundle_path(tmp_path)),
+    )
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "mnt/index" not in app.env.found_docs, "fail closed"
+    assert "mount_gate_unevaluable" in warning, warning
+    assert "between 450 and 500" in warning, warning
+
+
+def test_a_mountconfig_instance_carrying_a_gate_is_reported(make_app, tmp_path):
+    """``gated_by`` is an internal field, and a ``conf.py`` author can still set it.
+
+    ``_INTERNAL_MOUNT_FIELDS`` keeps it out of TOML, but the dataclass
+    constructor is public enough to read, and ``_mount_conditions`` skips
+    instances — so the condition is never evaluated and the bundle vanishes.
+    Fail-closed, and (before this) completely silent: no record, no warning.
+
+    The condition here is **true** for the variant, so a silent gate is
+    unambiguously a surprise rather than a variant.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml="[needs.variant_data]\nedition = 'pro'\n",
+        conf_extra=(
+            "from pathlib import Path\n"
+            "from sphinx_mounts.config import MountConfig\n"
+            f'mounts = [MountConfig(dir=Path("{bundle_path(tmp_path)}"), '
+            'mount_at="mnt", gated_by="var.edition == \'pro\'")]'
+        ),
+    )
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "mnt/index" not in app.env.found_docs, "fail closed"
+    assert "mount_gate_unevaluable" in warning, warning
+    assert "`gated_by` set directly" in warning, warning
+
+
+def test_a_reader_decided_gate_is_not_reported_as_unevaluable(make_app, tmp_path):
+    """The other direction: the ordinary route must stay quiet.
+
+    The parse seam reports a gate the reader did not decide, so it has to be
+    able to tell the two apart. A false positive here would fail ``-W`` on
+    every correctly gated build there is.
+    """
+    confdir, _ = make_project(tmp_path, toml=DIR_MOUNT_TOML.replace("EDITION", "basic"))
+    app = _build(make_app, confdir)
+    assert "mount_gate_unevaluable" not in app._warning.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: the three stand-down paths, each with its own reason AND remedy
+# ---------------------------------------------------------------------------
+
+
+def test_the_missing_toml_stand_down_gates_off_with_its_own_remedy(make_app, tmp_path):
+    """Path 2 of three: the file this extension reads is not there.
+
+    The mount came from ``conf.py`` — a TOML-declared mount cannot be in
+    ``config.mounts`` without the file the loader at 400 read it from — so
+    "declare the mount in the TOML file this extension reads" would be an
+    instruction to write into a file that does not exist. The remedy has to be
+    to create it, or to stop declaring a condition this reader cannot evaluate.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml="",
+        conf_extra=(
+            'sources_from_toml = "nowhere.toml"\n'
+            f'mounts = [{{"dir": "{bundle_path(tmp_path)}", "mount_at": "mnt", '
+            '"if": "var.edition == \'pro\'"}]'
+        ),
+    )
+    (confdir / "ubproject.toml").unlink()
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "mnt/index" not in app.env.found_docs, "fail closed"
+    assert "mount_gate_unevaluable" in warning, warning
+    assert "nowhere.toml" in warning, warning
+    assert "does not exist" in warning, warning
+    assert "Create that file" in warning, warning
+
+
+def test_the_unreadable_data_stand_down_gates_off_with_its_own_remedy(
+    make_app, tmp_path
+):
+    """Path 3 of three, and the one that could be made to fail OPEN unnoticed.
+
+    ``_on_load_variants`` hands the gates to the fold on this path precisely so
+    that a bundle whose condition could not be evaluated keeps its marker.
+    Passing ``()`` instead — the exact shape of a careless refactor — publishes
+    every gated bundle, and before this test nothing anywhere went red.
+
+    The remedy differs from the other two paths again: the mount IS declared in
+    the file this extension reads, so nothing about the mount has to change.
+    """
+    confdir, _ = make_project(tmp_path, toml=DIR_MOUNT_TOML.replace("EDITION", "basic"))
+    _stub_conf(
+        confdir, "needs_stub_gate_unreadable", inline="{}", file_ref='"nope.json"'
+    )
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "mnt/index" not in app.env.found_docs, "fail closed"
+    assert "mount_gate_unevaluable" in warning, warning
+    assert "the variant data could not be read" in warning, warning
+    assert "nothing about the mount has to change" in warning, warning
+
+
+def test_the_unreadable_data_stand_down_still_strips_a_live_mount(make_app, tmp_path):
+    """The other half of path 3: a mount with no ``if`` must stay unblemished.
+
+    The fold runs on this path for the strip as much as for the gate, so a
+    sibling mount that declares no condition must neither disappear nor collect
+    a ``mounts.unknown_key``.
+    """
+    toml = (
+        DIR_MOUNT_TOML.replace("EDITION", "basic")
+        + '\n[[source.mounts]]\ndir = "{rival}"\nmount_at = "riv"\n'
+    )
+    confdir, _ = make_project(tmp_path, toml=toml)
+    _stub_conf(
+        confdir, "needs_stub_gate_unreadable2", inline="{}", file_ref='"nope.json"'
+    )
+    app = _build(make_app, confdir)
+    assert "mounts.unknown_key" not in app._warning.getvalue()
+    assert "riv/index" in app.env.found_docs
+    assert "mnt/index" not in app.env.found_docs
+
+
+def test_the_switched_off_toml_stand_down_names_its_own_remedy(make_app, tmp_path):
+    """Path 1 of three: ``sources_from_toml = None``.
+
+    TOML reading is switched off *entirely*, so telling the author to declare
+    the mount in the TOML file this extension reads is an instruction that
+    changes nothing. Decision 7 claimed three paths and three remedies; before
+    this assertion only the reason was ever a parameter.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml="",
+        conf_extra=(
+            "sources_from_toml = None\n"
+            f'mounts = [{{"dir": "{bundle_path(tmp_path)}", "mount_at": "mnt", '
+            '"if": "var.edition == \'pro\'"}]'
+        ),
+    )
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "mnt/index" not in app.env.found_docs, "fail closed"
+    assert "`sources_from_toml` is set to None" in warning, warning
+    assert "Stop setting `sources_from_toml` to None" in warning, warning
+
+
+def test_the_gate_report_prints_its_code_once(make_app, tmp_path):
+    """One code per record, like every other ``log_warning`` in the module.
+
+    ``log_warning`` already appends the subtype on Sphinx < 8 and lets Sphinx
+    print the type on >= 8; a literal in the message body doubles it. The five
+    places that do carry a literal are all *raised*, where Sphinx adds nothing.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml="",
+        conf_extra=(
+            "sources_from_toml = None\n"
+            f'mounts = [{{"dir": "{bundle_path(tmp_path)}", "mount_at": "mnt", '
+            '"if": "var.edition == \'pro\'"}]'
+        ),
+    )
+    app = _build(make_app, confdir)
+    assert app._warning.getvalue().count("mount_gate_unevaluable") == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: a hard refusal must not name a table the user never wrote
+# ---------------------------------------------------------------------------
+
+
+MISPOINTED_MOUNTS_ONLY_TOML = """
+[[source.mounts]]
+dir = "{bundle}"
+mount_at = "mnt"
+if = "var.edition == 'pro'"
+
+[needs.variant_data]
+edition = "basic"
+"""
+
+
+def test_the_mispointed_needs_refusal_names_the_keys_actually_declared(
+    make_app, tmp_path
+):
+    """A mounts-only project can now reach a guard that was rules-only.
+
+    Before the restructure ``_resolve_variant_map`` sat behind a
+    ``not spec.rules`` guard, so this refusal could only fire for a project
+    that had written ``[[source.variant_sources]]``. It is now reachable by a
+    project that declares no rules at all — and a hard error with no ``-W``
+    escape must not describe a table the author never wrote, nor consequences
+    ("every rule would exclude its files") that cannot happen.
+    """
+    confdir, _ = make_project(tmp_path, toml=MISPOINTED_MOUNTS_ONLY_TOML)
+    _stub_conf(
+        confdir,
+        "needs_stub_mispointed_mounts_only",
+        inline="{}",
+        file_ref="None",
+        from_toml='"other.toml"',
+    )
+    with pytest.raises(Exception) as excinfo:
+        _build(make_app, confdir)
+    message = str(excinfo.value)
+    assert "variant_data_unreadable" in message
+    assert "[[source.variant_sources]]" not in message, message
+    assert "`if` on `[[source.mounts]]`" in message, message
+    assert "gate its whole bundle off" in message, message
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: two gated mounts contesting one mount_at, and the contest note
+# ---------------------------------------------------------------------------
+
+
+TWO_GATED_TOML = """
+[[source.mounts]]
+dir = "{bundle}"
+mount_at = "mnt"
+if = "var.edition == 'pro'"
+
+[[source.mounts]]
+dir = "{rival}"
+mount_at = "mnt"
+if = "var.edition == 'enterprise'"
+
+[needs.variant_data]
+edition = "basic"
+"""
+
+
+def test_two_gated_mounts_at_one_mount_at_take_the_lower_index_label(
+    make_app, tmp_path
+):
+    """Neither registers, so both would supply ``mnt/index``. Who owns the label?
+
+    ``_gated_mount_docnames`` uses ``setdefault`` so the lower-numbered gate
+    owns a contested attribution. The page is absent either way, so only the
+    label is at stake — but an arbitrary label would make the message depend on
+    dictionary iteration order, and nothing would ever say so.
+    """
+    confdir, _ = make_project(
+        tmp_path, toml=TWO_GATED_TOML, host_entries=("mnt/index",)
+    )
+    attributed: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=attributed, warningiserror=True)
+    assert attributed["mnt/index"].startswith("[[source.mounts]][0]")
+    assert attributed["mnt/binternal"].startswith("[[source.mounts]][0]")
+    assert app.statuscode == 0, "a correctly gated build must pass -W"
+
+
+def test_a_contested_gated_mount_says_why_its_attribution_is_empty(make_app, tmp_path):
+    """The user's only bridge from a bare ``toc.not_readable`` back to the gate.
+
+    When a live mount or the host claims a docname the gated bundle would have
+    supplied, the gated pass takes the same whole-mount skip the live path
+    takes, and attributes nothing — so a reference to the bundle's *other*
+    pages is an ordinary warning. That is the documented conservative
+    direction, but without this sentence the build log connects none of it to
+    the gate the author wrote.
+    """
+    confdir, _ = make_project(
+        tmp_path, toml=TWO_MOUNTS_TOML, host_entries=("mnt/index",)
+    )
+    app = _build(make_app, confdir)
+    status = app._status.getvalue()
+    assert MOUNT_GATED_CODE in status
+    assert "Attribution suppressed" in status, status
+    assert "mnt/index" in status
+
+
+def test_an_uncontested_gated_mount_carries_no_contest_note(make_app, tmp_path):
+    """The negative control, so the note means something when it appears."""
+    confdir, _ = make_project(tmp_path, toml=DIR_MOUNT_TOML.replace("EDITION", "basic"))
+    app = _build(make_app, confdir)
+    status = app._status.getvalue()
+    assert MOUNT_GATED_CODE in status
+    assert "Attribution suppressed" not in status

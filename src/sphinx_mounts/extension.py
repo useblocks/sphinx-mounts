@@ -62,6 +62,15 @@ _CACHED_KEY = "_sphinx_mounts_parsed"
 #: ``builder-inited`` half to act on. See :class:`_VariantState`.
 _VARIANT_STATE_KEY = "_sphinx_mounts_variant_state"
 
+#: Application attribute holding the ``(mount index, condition)`` pairs the
+#: reader at priority 450 actually **decided** this build — gated off or left
+#: live, either way it looked at them.
+#:
+#: The parser at 500 subtracts this from what it finds, so a gate that reached
+#: it by some other route is reported rather than applied in silence. See
+#: :func:`_report_undecided_gates`.
+_DECIDED_GATES_KEY = "_sphinx_mounts_decided_gates"
+
 #: Application attribute caching the resolved TOML path setting, so the
 #: deprecation warning for ``mounts_from_toml`` fires once rather than once per
 #: reader.
@@ -132,9 +141,75 @@ def _on_config_inited(app: Sphinx, config: Config) -> None:
     (see :mod:`sphinx.application`), so the actual project replacement is
     deferred to ``builder-inited``. We still parse here to surface
     configuration errors as early as possible.
+
+    This is also the **last** seam a gate can pass through, which is why the
+    undecided-gate report lives here rather than only in the reader at 450 —
+    see :func:`_report_undecided_gates`.
     """
     parsed = parse_mounts(getattr(config, "mounts", None), Path(app.confdir))
+    _report_undecided_gates(app, parsed)
     setattr(app, _CACHED_KEY, parsed)
+
+
+def _report_undecided_gates(app: Sphinx, parsed: tuple[MountConfig, ...]) -> None:
+    """Report every gate the reader at 450 did not decide.
+
+    **Every route that gates has to be a route that reports.** The reader at
+    450 reports the gates it stood down over, but it can only see the mounts
+    that existed when it ran, and a surviving ``if`` is read as *gated off* by
+    whatever produces a :class:`~sphinx_mounts.config.MountConfig`. Two routes
+    reach the parser carrying a gate the reader never saw:
+
+    * a ``config-inited`` handler at a priority **between 450 and 500** — a
+      sibling extension, or a mono-repo ``conf.py`` computing its mounts —
+      writing ``config["mounts"]`` after the reader has run;
+    * a ``conf.py`` that constructs
+      ``MountConfig(gated_by=…)`` directly. ``gated_by`` is documented as not a
+      user key and ``_INTERNAL_MOUNT_FIELDS`` keeps it out of TOML, but the
+      dataclass constructor is public enough to read.
+
+    Both gate the bundle off — fail-closed is the only defensible reading of a
+    condition nothing evaluated — and both used to do it in complete silence,
+    which is the "where did my 400 pages go" hazard the ``mounts.mount_gated``
+    record exists to prevent, reached through the one door the reader does not
+    stand in front of.
+
+    Decided gates are recognised by ``(index, condition)`` rather than by index
+    alone, so a handler that REPLACES a mount in that window is caught too. The
+    pairing is still positional, so a handler that *prepends* in that window
+    shifts a decided gate's index and it is reported here as undecided. That is
+    an over-report on a configuration that has already broken the index-keying
+    :func:`_wiring_signature` documents — loud and fail-closed, which is the
+    right direction for the mistake to fall in.
+    """
+    decided: frozenset[tuple[int, str]] = (
+        getattr(app, _DECIDED_GATES_KEY, None) or frozenset()
+    )
+    for index, mount in enumerate(parsed):
+        if mount.gated_by is None:
+            continue
+        if (index, mount.gated_by) in decided:
+            continue
+        log_warning(
+            logger,
+            _unevaluable_gate_message(
+                mount_gate_label(index, mount.gated_by),
+                reason=(
+                    "this extension's variant reader never saw it — the mount "
+                    "reached the parser after that reader ran (a "
+                    "`config-inited` handler at a priority between 450 and "
+                    "500), or it was built as a `MountConfig` with `gated_by` "
+                    "set directly"
+                ),
+                remedy=(
+                    "Declare the mount before `config-inited` priority 450 — "
+                    "in the TOML file this extension reads, or as a plain "
+                    "mapping in `conf.py`'s `mounts` — and write the condition "
+                    "as `if`, so the reader can evaluate it."
+                ),
+            ),
+            "mount_gate_unevaluable",
+        )
 
 
 def _on_builder_inited(app: Sphinx) -> None:
@@ -794,22 +869,38 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
     5. the folds.
     """
     setattr(app, _VARIANT_STATE_KEY, None)
+    setattr(app, _DECIDED_GATES_KEY, frozenset())
     # Read BEFORE the stand-down paths below, so that a mount `if` this reader
     # cannot evaluate is decided rather than left on the table for the parser
     # at 500 to fail closed over in silence.
     gates = _mount_conditions(config)
     setting = _resolve_toml_setting(app, config)
     spec = None
+    toml_path = None
     if setting:
         toml_path = (Path(app.confdir) / setting).resolve()
         spec = load_variant_sources_from_toml(toml_path)
     if spec is None:
-        _report_unevaluable_gates(
-            gates,
-            "`sources_from_toml` is set to None, so nothing is read from TOML"
-            if not setting
-            else f"`{setting}` does not exist beside conf.py",
-        )
+        # The mounts came from `conf.py` on both of these: a TOML-declared
+        # mount cannot be in `config.mounts` without the file the loader at 400
+        # read it from, and that loader stands down for the same two reasons.
+        if not setting:
+            reason = (
+                "`sources_from_toml` is set to None, so nothing at all is read "
+                "from TOML"
+            )
+            remedy = (
+                "Stop setting `sources_from_toml` to None, or remove the `if` "
+                "from the mount."
+            )
+        else:
+            reason = f"the TOML file this extension reads ({toml_path}) does not exist"
+            remedy = (
+                "Create that file (or point `sources_from_toml` at the one you "
+                "meant), or remove the `if` from the mount."
+            )
+        _mark_gates_decided(app, gates)
+        _report_unevaluable_gates(gates, reason, remedy)
         return
 
     rules = _usable_rules(spec)
@@ -819,17 +910,35 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
         _refuse_glob_dialects(rules, spec.toml_path)
         _guard_layout(app, config, spec, rules)
 
-    variant_data = _resolve_variant_map(app, config, spec)
+    variant_data = _resolve_variant_map(app, config, spec, gates)
     if variant_data is None:
-        # sphinx-needs owns the failure and will report it; see
-        # `_resolve_variant_map`. The mount gates still have to be decided —
-        # a gating key left undecided is a gating key that publishes.
+        # DEFENSIVE, and known to be so. `_resolve_variant_map` returns None
+        # only when sphinx-needs is PRESENT and this reader's own
+        # `resolve_variant_data` raises — and the two validators are deliberate
+        # mirrors, so on every supported sphinx-needs the identical failure is
+        # raised first, at its own priority 10, and the build never gets here.
+        # Four constructions were tried against sphinx-needs 8.3.0 and all four
+        # aborted earlier. It is kept because the mirroring is a property of
+        # two projects on independent release cadences, not an invariant this
+        # one can enforce, and because what it guards is a gating key: the arm
+        # that stops existing is the arm that publishes.
+        #
+        # The mount gates still have to be decided — a gating key left
+        # undecided is a gating key that publishes. Handing `gates` to the fold
+        # is what keeps each marker on its table; passing `()` here would
+        # publish every gated bundle.
+        _mark_gates_decided(app, gates)
         _report_unevaluable_gates(
-            gates, "the variant data could not be read (sphinx-needs reports it)"
+            gates,
+            "the variant data could not be read, which sphinx-needs reports itself",
+            "Fix the variant data sphinx-needs is reporting on. The mount is "
+            "already declared in the file this extension reads, so nothing "
+            "about the mount has to change.",
         )
         _fold_into_mounts(app, config, (), gates)
         return
 
+    _mark_gates_decided(app, gates)
     excluding, gated = _false_for_this_variant(rules, gates, variant_data)
 
     host_patterns = tuple(
@@ -841,7 +950,6 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
     appended = [pattern for _, patterns in host_patterns for pattern in patterns]
     config.exclude_patterns = [*config.exclude_patterns, *appended]
     narrowed = _fold_into_mounts(app, config, excluding, gated)
-    _report_gated_mounts(gated)
 
     if not excluding and not gated:
         logger.info(
@@ -894,12 +1002,49 @@ def _mount_conditions(config: Config) -> tuple[_MountGate, ...]:
     return tuple(gates)
 
 
-def _report_unevaluable_gates(gates: tuple[_MountGate, ...], reason: str) -> None:
+def _mark_gates_decided(app: Sphinx, gates: tuple[_MountGate, ...]) -> None:
+    """Record that this reader looked at these gates, for the parser at 500.
+
+    "Decided" covers both verdicts and both stand-downs: what it means is that
+    the gate went through this reader, so the parser does not have to report it
+    as one that reached it by another route.
+    """
+    setattr(
+        app,
+        _DECIDED_GATES_KEY,
+        frozenset(
+            (gate.index, gate.condition)
+            for gate in gates
+            if isinstance(gate.condition, str)
+        ),
+    )
+
+
+def _unevaluable_gate_message(label: str, *, reason: str, remedy: str) -> str:
+    """Compose the message for one gate nothing could evaluate.
+
+    No literal ``[mounts.mount_gate_unevaluable]`` in the text: this goes
+    through :func:`~sphinx_mounts.logging.log_warning`, which already appends
+    the subtype on Sphinx < 8 and lets Sphinx print the type from 8 on. The
+    five messages in this module that DO carry a literal code are all
+    ``raise``d, where Sphinx adds nothing.
+    """
+    return (
+        f"sphinx-mounts: {label} declares a condition, but {reason}, so it "
+        f"could not be evaluated. The whole mount is gated OFF — the safe "
+        f"direction for a key whose purpose is keeping content out of the "
+        f"build. {remedy}"
+    )
+
+
+def _report_unevaluable_gates(
+    gates: tuple[_MountGate, ...], reason: str, remedy: str
+) -> None:
     """Report every mount ``if`` this reader could not evaluate.
 
     Reachable on the three paths where the reader stands down with mounts still
-    configured: the TOML file it reads does not exist, ``sources_from_toml`` is
-    ``None`` so nothing is read from TOML at all, or the variant map itself is
+    configured: ``sources_from_toml`` is ``None`` so nothing is read from TOML
+    at all, the TOML file it reads does not exist, or the variant map itself is
     unreadable and sphinx-needs owns that failure. On the first two the mounts
     came from ``conf.py`` — a TOML-declared mount cannot be in ``config.mounts``
     without the file the loader at 400 read it from.
@@ -914,24 +1059,23 @@ def _report_unevaluable_gates(gates: tuple[_MountGate, ...], reason: str) -> Non
     condition does: reported, and what it gates is excluded. ``-W`` escalates
     it, which is right — this is a misconfiguration, not a variant.
 
-    :param reason: Why the condition could not be evaluated, as a clause. The
-        caller knows which of the three it is and no two of them share a
-        remedy, so guessing from ``sources_from_toml`` here would describe the
-        wrong problem on two of the three.
+    :param reason: Why the condition could not be evaluated, as a clause.
+    :param remedy: What to do about it, as a sentence. It is a parameter for
+        the same reason ``reason`` is, and a sharper one: the three paths share
+        no remedy at all. "Declare the mount in the TOML file this extension
+        reads" changes nothing when TOML reading is switched off, names a file
+        that does not exist on the second path, and describes something already
+        true on the third.
     """
     for gate in gates:
-        msg = (
-            f"sphinx-mounts: {gate.label} declares a condition, but {reason}, "
-            f"so there is no variant data to evaluate it against. The whole "
-            f"mount is gated OFF — the safe direction for a key whose purpose "
-            f"is keeping content out of the build. Declare the mount in the "
-            f"TOML file this extension reads, or remove the "
-            f"`{MOUNT_CONDITION_KEY}`. [mounts.mount_gate_unevaluable]"
+        log_warning(
+            logger,
+            _unevaluable_gate_message(gate.label, reason=reason, remedy=remedy),
+            "mount_gate_unevaluable",
         )
-        log_warning(logger, msg, "mount_gate_unevaluable")
 
 
-def _report_gated_mounts(gated: tuple[_MountGate, ...]) -> None:
+def _report_gated_mounts(app: Sphinx, state: _VariantState) -> None:
     """Record every gated-off mount, whether or not anything references it.
 
     The record is the whole mitigation for this key's one genuinely nasty
@@ -946,14 +1090,37 @@ def _report_gated_mounts(gated: tuple[_MountGate, ...]) -> None:
     asked for. A warning would fail ``sphinx-build -W`` on every correctly
     configured variant build, which is the same trap the toctree downgrade
     exists to close.
+
+    Emitted from ``env-before-read-docs`` rather than from the reader at 450,
+    because that is the first point where both halves of the record exist. The
+    gate is a configuration fact; whether its attribution survived is a
+    DISCOVERY fact, and a contested gated mount is the one shape where the two
+    disagree — the bundle is gated *and* its pages are reported as ordinary
+    missing documents. Emitting the record before ``discover()`` had run meant
+    the log stated the first half and left the second to a bare
+    ``toc.not_readable`` with nothing joining them.
     """
-    for gate in gated:
+    project = getattr(app, "project", None)
+    contests: dict[int, str] = getattr(project, "_gated_contests", {})
+    for index, label in state.mount_gates:
+        contested = contests.get(index)
+        note = (
+            ""
+            if contested is None
+            else (
+                f" Attribution suppressed: docname(s) contested by the live "
+                f"build (first: {contested!r}), so toctree references into "
+                f"this bundle are reported as ordinary missing-document "
+                f"warnings rather than downgraded."
+            )
+        )
         logger.info(
             "sphinx-mounts: %s is false for this variant, so the whole mount "
             "is gated off — it contributes no documents, wires nothing into a "
-            "host toctree, and toctree references to its pages are downgraded. "
-            "[%s]",
-            gate.label,
+            "host toctree, and toctree references to its pages are "
+            "downgraded.%s [%s]",
+            label,
+            note,
             MOUNT_GATED_CODE,
         )
 
@@ -1107,7 +1274,10 @@ def _anchor_at_confdir(raw: Any, confdir: Path) -> Path:
 
 
 def _resolve_variant_map(
-    app: Sphinx, config: Config, spec: VariantSourcesConfig
+    app: Sphinx,
+    config: Config,
+    spec: VariantSourcesConfig,
+    gates: tuple[_MountGate, ...],
 ) -> dict[str, Any] | None:
     """Compute the merged variant map, or ``None`` to stand down.
 
@@ -1161,7 +1331,9 @@ def _resolve_variant_map(
             f"report this. [mounts.variant_data_unreadable]"
         )
         raise VariantRuleError(msg) from exc
-    _guard_mispointed_needs(app, config, spec, present=present, resolved=resolved)
+    _guard_mispointed_needs(
+        app, config, spec, gates, present=present, resolved=resolved
+    )
     return resolved
 
 
@@ -1180,10 +1352,11 @@ def _needs_toml_pointer(app: Sphinx, config: Config) -> Path | None:
     return (Path(app.confdir) / candidate).resolve()
 
 
-def _guard_mispointed_needs(
+def _guard_mispointed_needs(  # noqa: PLR0913
     app: Sphinx,
     config: Config,
     spec: VariantSourcesConfig,
+    gates: tuple[_MountGate, ...],
     *,
     present: bool,
     resolved: dict[str, Any],
@@ -1191,10 +1364,21 @@ def _guard_mispointed_needs(
     """Refuse a project whose variant data is declared but never read.
 
     The conjunction is deliberately narrow, and every conjunct is statically
-    knowable at this point: rules are declared, sphinx-needs is **present** (so
-    its resolved map is what this reader must agree with), the TOML **declares**
-    variant data, that map came out **empty**, and sphinx-needs' own
-    ``needs_from_toml`` does **not** point at this file.
+    knowable at this point: at least one variant-gating key is declared —
+    ``[[source.variant_sources]]`` rules, ``if`` on a mount entry, or both, the
+    caller having already returned when neither is — sphinx-needs is
+    **present** (so its resolved map is what this reader must agree with), the
+    TOML **declares** variant data, that map came out **empty**, and
+    sphinx-needs' own ``needs_from_toml`` does **not** point at this file.
+
+    The first conjunct used to read "rules are declared", and the caller used to
+    enforce it by standing down before this function whenever a project had no
+    rules. It no longer does, because a project that gates only mounts has to
+    reach the fold — so the message has to name what the file actually
+    declares. A hard error with no ``-W`` escape that names a table the author
+    never wrote, and describes work ("every rule would exclude its files") that
+    cannot happen, is the same defect this key's own diagnostics were shaped to
+    avoid.
 
     The last conjunct is the one that makes the guard safe to fire. Without it
     the guard read "the map is empty" and refused a correctly wired project
@@ -1226,11 +1410,11 @@ def _guard_mispointed_needs(
         if pointer is not None
         else "sphinx-needs was never pointed at it"
     )
+    declared, consequence = _declared_gating_keys(spec, gates)
     msg = (
         f"sphinx-mounts: `{spec.toml_path}` declares `[needs] variant_data` "
-        f"and `[[source.variant_sources]]`, but {where}, so it resolved an "
-        f"EMPTY variant map. Every rule would report an unknown key and "
-        f"exclude its files, and the whole gated document set would silently "
+        f"and {declared}, but {where}, so it resolved an EMPTY variant map. "
+        f"{consequence}, and the whole gated document set would silently "
         f"disappear.\n"
         f"Point sphinx-needs at the same file, in conf.py:\n"
         f'    needs_from_toml = "{spec.toml_path.name}"\n'
@@ -1239,6 +1423,31 @@ def _guard_mispointed_needs(
         f"documents exist. [mounts.variant_data_unreadable]"
     )
     raise VariantRuleError(msg)
+
+
+def _declared_gating_keys(
+    spec: VariantSourcesConfig, gates: tuple[_MountGate, ...]
+) -> tuple[str, str]:
+    """Name the variant-gating keys this file actually carries, and their cost.
+
+    Both halves are needed by the same message and neither can be a constant
+    any more: a project may declare rules, mount ``if``s, or both, and what an
+    empty variant map costs is different for each — a rule excludes the files
+    it names, a mount ``if`` takes a whole bundle.
+
+    :return: ``(what the file declares, what an empty map would do)``.
+    """
+    rule_key = VARIANT_SOURCES_LOCATION
+    mount_key = f"`{MOUNT_CONDITION_KEY}` on `{NAMESPACED_MOUNTS_LOCATION}`"
+    rule_cost = "Every rule would report an unknown key and exclude its files"
+    mount_cost = (
+        "Every mount `if` would report an unknown key and gate its whole bundle off"
+    )
+    if spec.rules and gates:
+        return f"`{rule_key}` and {mount_key}", f"{rule_cost}; {mount_cost}"
+    if gates:
+        return mount_key, mount_cost
+    return f"`{rule_key}`", rule_cost
 
 
 def _anchor_data_file(raw: Any, confdir: Path) -> Path | None:
@@ -1644,6 +1853,7 @@ def _on_install_variant_filter(app: Sphinx, _env: Any, _docnames: list[str]) -> 
     if state is None:
         mount_warnings.remove_downgrade_filters()
         return
+    _report_gated_mounts(app, state)
     cached = getattr(app, _VARIANT_ATTRIBUTION_KEY, None)
     if cached is not None and cached[0] is state:
         walked = cached[1]

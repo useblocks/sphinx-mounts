@@ -41,17 +41,33 @@ logger = logging.getLogger(__name__)
 def _mount_problem(message: str, topic: WarningTopics, *, gated: bool) -> None:
     """Report a mount-level problem, unless the mount is gated off.
 
-    Every problem this module finds is *hypothetical* for a mount that a
-    variant condition gated out of the build: its absent bundle root does not
-    matter, the docname it would have contested is not contested, and the host
-    directory at its ``mount_at`` is not occupied by it. These are warnings, so
-    reporting them would not merely be noise — it would fail
-    ``sphinx-build -W`` on a project whose only sin is gating a mount.
+    Two of the problems this covers are genuinely *hypothetical* for a mount a
+    variant condition gated out of the build, and suppressing those is plainly
+    right: an absent bundle root does not matter to a bundle nobody is
+    building, and a host directory at its ``mount_at`` is not occupied by a
+    mount that is not there. These are warnings, so reporting them would not
+    merely be noise — it would fail ``sphinx-build -W`` on a project whose only
+    sin is gating a bundle its CI has not checked out.
 
-    The problem still changes the OUTCOME for a gated mount, and that is the
-    point: the whole-mount skips are exactly the reductions the attribution has
-    to reproduce, which is why the real pipeline runs for a gated mount at all.
-    Only the report is suppressed.
+    The other four are **properties of the bundle itself**, true in every
+    variant: a ``docname_conflict`` between two of the mount's own files, an
+    ``unknown_suffix``, an ``empty_docname``, and ``ignored_option`` — a plain
+    configuration typo. Suppressing those is a recorded trade-off rather than
+    an obvious win: a CI that only ever builds the gated variant never learns
+    the bundle is broken. It is taken because the alternative reintroduces the
+    ``-W`` failure this suppression exists to remove, and because a variant
+    that DOES build the bundle reports every one of them. Splitting the two
+    classes is a follow-up candidate, not something to change under a gating
+    key's own review.
+
+    A ``docname_conflict`` against the HOST or an earlier LIVE mount is a third
+    thing again — a contest, not a defect — and the caller records it so the
+    gated record can say the attribution was suppressed by it.
+
+    Whatever is suppressed, the problem still changes the OUTCOME for a gated
+    mount, and that is the point: the whole-mount skips are exactly the
+    reductions the attribution has to reproduce, which is why the real pipeline
+    runs for a gated mount at all. Only the report is suppressed.
     """
     if gated:
         logger.debug("sphinx-mounts: (gated-off mount) %s", message)
@@ -206,6 +222,14 @@ class _MountAwareProject(Project):
         # not even in the build. Consumed by the toctree downgrade's
         # attribution. Rebuilt each discover().
         self._gated_entry_docnames: dict[int, list[str]] = {}
+        # For each gated-off mount whose attribution was emptied by a CONTEST —
+        # the host or a live mount already provides a docname it would have
+        # supplied — the first contested docname. The whole-mount skip is the
+        # documented conservative direction, but it leaves a reference to the
+        # bundle's other pages as a bare `toc.not_readable` with nothing
+        # connecting it to the gate, so the record can say which docname did
+        # it. Rebuilt each discover().
+        self._gated_contests: dict[int, str] = {}
 
     def __getstate__(self) -> dict[str, Any]:
         """Keep mount state out of ``environment.pickle``.
@@ -225,7 +249,7 @@ class _MountAwareProject(Project):
         name, which would turn a rename into a hard failure inside someone
         else's CI rather than a cache miss.
 
-        The four fields are *emptied* rather than removed from the state.
+        The five fields are *emptied* rather than removed from the state.
         The unpickled instance is handed to ``Project.restore`` before it is
         discarded, and an emptied field keeps it structurally valid — whereas
         a missing attribute would make any future read a crash instead of a
@@ -241,6 +265,7 @@ class _MountAwareProject(Project):
         state["_doc_roots"] = {}
         state["_mount_entry_docnames"] = {}
         state["_gated_entry_docnames"] = {}
+        state["_gated_contests"] = {}
         return state
 
     def discover(
@@ -278,6 +303,7 @@ class _MountAwareProject(Project):
         self._doc_roots = {}
         self._mount_entry_docnames = {}
         self._gated_entry_docnames = {}
+        self._gated_contests = {}
         srcdir = Path(self.srcdir)
         for index, mount in enumerate(self._mounts):
             if mount.gated_by is not None:
@@ -653,6 +679,12 @@ def _attach_entries(  # noqa: PLR0913
                 f"{_skip_consequence(entries)} Mount the bundle under a "
                 f"different mount_at, or {_drop_one_file_remedy(mount)}."
             )
+            if gated:
+                # A contest, not a conflict: this variant has no conflict at
+                # all, because the mount is not in it. What it costs is the
+                # attribution, and the gated record is where the user learns
+                # that.
+                project._gated_contests[index] = docname
             _mount_problem(msg, "docname_conflict", gated=gated)
             return []
         if docname in seen:
@@ -739,7 +771,7 @@ def install_mount_aware_project(
     the resulting project would look complete and simply be missing
     something.
 
-    The four fields this subclass owns are excluded (the constructor has
+    The five fields this subclass owns are excluded (the constructor has
     just set them, and they are per-mount state that has nothing to do with
     the project being replaced), and the three docname/path dictionaries are
     re-copied afterwards so *those* are not shared. Any other attribute is
@@ -761,6 +793,7 @@ def install_mount_aware_project(
         "_doc_roots",
         "_mount_entry_docnames",
         "_gated_entry_docnames",
+        "_gated_contests",
     }
     for name, value in getattr(app_project, "__dict__", {}).items():
         if name not in owned:
