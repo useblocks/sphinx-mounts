@@ -381,6 +381,29 @@ class MountConfig:
         )
 
 
+def normalise_condition(raw: Any) -> str:
+    """Render a raw ``if`` value as the string every seam will compare.
+
+    **One function, so that two seams cannot disagree.** The reader at
+    ``config-inited`` priority 450 records the conditions it decided and the
+    parser at 500 matches what it finds against them; if the two derived their
+    strings separately, a value that is not a usable condition would be spelled
+    one way by one and another way by the other, and a gate the reader had
+    already reported would be reported a second time under a different label.
+
+    A usable condition — a non-blank string — is returned verbatim, so the
+    grammar sees exactly what the author wrote. Anything else is rendered
+    through :func:`repr`, which keeps it printable and keeps ``""`` distinct
+    from ``"   "`` and from ``3``. Such a value cannot arrive from a project
+    the reader evaluated (a non-string ``if`` is one of the offenders it
+    refuses the whole configuration over); it belongs to the routes nothing
+    evaluates, where fail-closed is the only defensible reading.
+    """
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return repr(raw)
+
+
 def _gate_from_entry(entry: dict[str, Any]) -> str | None:
     """Pop :data:`MOUNT_CONDITION_KEY` off a raw entry and read it as the gate.
 
@@ -388,19 +411,13 @@ def _gate_from_entry(entry: dict[str, Any]) -> str | None:
     live mount reaches this function in — the reader at priority 450 strips
     the key from every mount whose condition holds.
 
-    A value that is not a usable condition string still gates the mount off,
-    rendered through :func:`repr` so the label can quote what was written. It
-    cannot arrive from a project the reader saw: a non-string ``if`` is one of
-    the offenders that reader refuses the whole configuration over. What it
-    covers is the route the reader never sees, where fail-closed is the only
-    defensible reading.
+    A value that is not a usable condition string still gates the mount off;
+    see :func:`normalise_condition` for how it is rendered and why that
+    rendering is shared.
     """
     if MOUNT_CONDITION_KEY not in entry:
         return None
-    raw = entry.pop(MOUNT_CONDITION_KEY)
-    if isinstance(raw, str) and raw.strip():
-        return raw
-    return repr(raw)
+    return normalise_condition(entry.pop(MOUNT_CONDITION_KEY))
 
 
 def _entry_label(entry: Mapping[str, Any]) -> str:

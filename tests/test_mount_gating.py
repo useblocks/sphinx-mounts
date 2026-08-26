@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging as stdlib_logging
 from pathlib import Path
+import pickle
 import textwrap
 from typing import Any
 
@@ -836,16 +837,41 @@ def test_gated_docnames_never_reach_the_wiring_dictionary(make_app, tmp_path):
 
 
 def test_the_gated_docnames_stay_out_of_the_pickled_environment(make_app, tmp_path):
-    """``__getstate__`` clears the new field like the three beside it.
+    """``__getstate__`` clears the new fields like the three beside them.
 
-    Nothing reads it back — ``discover()`` rebuilds it every build — so
-    pickling it would be cache weight plus a version coupling, and the mount
+    Nothing reads them back — ``discover()`` rebuilds them every build — so
+    pickling them would be cache weight plus a version coupling, and the mount
     state this extension deliberately keeps out of every user's ``.doctrees``
     would be back.
+
+    All **five** owned fields are asserted, and through a real
+    ``environment.pickle`` as well as through the method, because the docstring
+    makes its promise about the file rather than about the call. The project
+    contests a docname so that the skip dictionary is genuinely non-empty —
+    otherwise deleting its clear would be an equivalent mutant rather than a
+    fenced one.
     """
-    confdir, _ = make_project(tmp_path, toml=DIR_MOUNT_TOML.replace("EDITION", "basic"))
+    confdir, _ = make_project(
+        tmp_path, toml=TWO_MOUNTS_TOML, host_entries=("mnt/index",)
+    )
     app = _build(make_app, confdir)
-    assert app.env.project.__getstate__()["_gated_entry_docnames"] == {}
+    project = app.env.project
+    assert project._gated_skips, "the mutant has to be reachable to be fenced"
+    state = project.__getstate__()
+    for field in (
+        "_mounts",
+        "_doc_roots",
+        "_mount_entry_docnames",
+        "_gated_entry_docnames",
+        "_gated_skips",
+    ):
+        assert not state[field], field
+    env = pickle.loads(  # noqa: S301
+        (Path(app.doctreedir) / "environment.pickle").read_bytes()
+    )
+    assert getattr(env.project, "_gated_skips", {}) == {}
+    assert getattr(env.project, "_gated_entry_docnames", {}) == {}
+    assert getattr(env.project, "_mounts", ()) == ()
 
 
 @pytest.mark.parametrize("edition", ["pro", "basic"])
@@ -1346,4 +1372,183 @@ def test_an_uncontested_gated_mount_carries_no_contest_note(make_app, tmp_path):
     app = _build(make_app, confdir)
     status = app._status.getvalue()
     assert MOUNT_GATED_CODE in status
+    assert "Attribution suppressed" not in status
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2: the gate pairing must not depend on a mount's POSITION
+# ---------------------------------------------------------------------------
+
+
+PREPENDING_HANDLER_CONF = """
+def _prepend(app, config):
+    config["mounts"] = [
+        {{"dir": "{rival}", "mount_at": "riv"}},
+        *config["mounts"],
+    ]
+
+
+def setup(app):
+    # 460 is inside the (450, 500) window, and this handler is deterministic:
+    # the resulting `mounts` value is byte-identical on every build.
+    app.connect("config-inited", _prepend, priority=460)
+"""
+
+
+def test_a_prepending_handler_does_not_over_report_a_decided_gate(make_app, tmp_path):
+    """A mount the reader DID decide must not be reported as one it did not.
+
+    The gate here comes from ``ubproject.toml`` and was evaluated at priority
+    450. A handler at 460 then prepends a computed mount, which shifts the
+    gated mount from index 0 to index 1 — and nothing about the configuration
+    is broken by that: the `mounts` value is byte-identical across builds, so
+    the index-keying `_wiring_signature` relies on is perfectly stable.
+
+    Pairing the reader's verdict to a POSITION made this a guaranteed spurious
+    warning on every build, carrying a reason ("the mount reached the parser
+    after that reader ran") that is false for this mount.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        conf_extra=PREPENDING_HANDLER_CONF.format(rival=(tmp_path / "rival")),
+    )
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "mnt/index" not in app.env.found_docs, "still gated"
+    assert "riv/index" in app.env.found_docs, "the prepended mount is live"
+    assert "mount_gate_unevaluable" not in warning, warning
+
+
+def test_a_prepending_handler_keeps_the_gates_attribution(make_app, tmp_path):
+    """The same shift must not lose the attribution across the 450/500 seam.
+
+    The gate label and the discovery dict have to name the same mount. Keying
+    one on the reader's view of the list and the other on the parser's meant a
+    prepend silently attributed nothing — a second spurious ``-W`` red on the
+    same working project, this time with no message explaining it at all.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        conf_extra=PREPENDING_HANDLER_CONF.format(rival=(tmp_path / "rival")),
+        host_entries=("mnt/index", "riv/index"),
+    )
+    attributed: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=attributed, warningiserror=True)
+    assert "mnt/index" in attributed, attributed
+    assert attributed["mnt/index"].startswith("[[source.mounts]][1]"), attributed
+    assert "WARNING" not in app._warning.getvalue()
+    assert app.statuscode == 0
+
+
+@pytest.mark.parametrize("written", ['""', '"   "', "3", "True"])
+def test_a_degenerate_condition_is_reported_exactly_once(make_app, tmp_path, written):
+    """One mount, one gate, one record — whatever the ``if`` value looks like.
+
+    The reader recorded the condition it saw; the parser stored the same value
+    through a ``repr`` fallback for anything that is not a usable condition
+    string. The two never agreed, so a mount the reader had already reported
+    was reported a SECOND time by the parser, under a different label and with
+    a reason that was false. The log read as two mounts.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml="",
+        conf_extra=(
+            "sources_from_toml = None\n"
+            f'mounts = [{{"dir": "{bundle_path(tmp_path)}", "mount_at": "mnt", '
+            f'"if": {written}}}]'
+        ),
+    )
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "mnt/index" not in app.env.found_docs, "fail closed"
+    assert warning.count("mount_gate_unevaluable") == 1, warning
+
+
+def test_a_mount_replaced_inside_the_window_is_still_reported(make_app, tmp_path):
+    """The catch the pairing exists for, kept across the redesign.
+
+    The reader evaluated one condition; a handler at 470 swaps in a mount
+    carrying a DIFFERENT one at the same index. Nothing evaluated the new
+    condition, so the bundle must be gated off and said so — a mechanism that
+    matched on position alone would see "index 0, already decided" and stay
+    quiet.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "pro"),
+        conf_extra=(
+            "def _swap(app, config):\n"
+            "    config['mounts'] = [\n"
+            f'        {{"dir": "{bundle_path(tmp_path)}", "mount_at": "mnt", '
+            '"if": "var.edition == \'basic\'"}\n'
+            "    ]\n"
+            "\n"
+            "def setup(app):\n"
+            "    app.connect('config-inited', _swap, priority=470)\n"
+        ),
+    )
+    app = _build(make_app, confdir)
+    warning = app._warning.getvalue()
+    assert "mnt/index" not in app.env.found_docs, "fail closed"
+    assert "mount_gate_unevaluable" in warning, warning
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2: the record must not promise a downgrade it did not perform
+# ---------------------------------------------------------------------------
+
+
+def test_a_strict_mount_at_skip_says_why_the_attribution_is_empty(make_app, tmp_path):
+    """``strict_mount_at`` empties a gated mount's attribution too.
+
+    The contest is not the only whole-mount skip the gated pass takes, and the
+    record's closing clause — "toctree references to its pages are downgraded"
+    — is false for every one of them. A user gets a bare ``toc.not_readable``
+    under a log line telling them it was downgraded.
+    """
+    toml = DIR_MOUNT_TOML.replace(
+        'mount_at = "mnt"', 'mount_at = "mnt"\nstrict_mount_at = true'
+    )
+    confdir, _ = make_project(
+        tmp_path,
+        toml=toml.replace("EDITION", "basic"),
+        host_entries=("mnt/placeholder",),
+        host_files={"mnt/placeholder.rst": "Placeholder\n===========\n"},
+    )
+    app = _build(make_app, confdir)
+    status = app._status.getvalue()
+    assert MOUNT_GATED_CODE in status
+    assert "Attribution suppressed" in status, status
+    assert "directory at the mount point" in status, status
+    assert "Toctree references to its pages are downgraded." not in status, status
+
+
+def test_an_absent_root_skip_says_why_the_attribution_is_empty(make_app, tmp_path):
+    """The shape the suppression of ``missing_path`` exists for, said out loud.
+
+    "A bundle its CI has not checked out" is the headline reason a gated
+    mount's absent root goes unreported — so gate-a-bundle-you-do-not-have,
+    reference it from a 150% index, and the build was red under a log line
+    claiming the reference had been downgraded.
+    """
+    toml = DIR_MOUNT_TOML.replace('dir = "{bundle}"', 'dir = "{bundle}-gone"')
+    confdir, _ = make_project(tmp_path, toml=toml.replace("EDITION", "basic"))
+    app = _build(make_app, confdir)
+    status = app._status.getvalue()
+    assert MOUNT_GATED_CODE in status
+    assert "Attribution suppressed" in status, status
+    assert "not on disk" in status, status
+
+
+def test_a_gated_mount_that_attributes_its_pages_still_promises_the_downgrade(
+    make_app, tmp_path
+):
+    """The positive control: the clause is conditional, not deleted."""
+    confdir, _ = make_project(tmp_path, toml=DIR_MOUNT_TOML.replace("EDITION", "basic"))
+    app = _build(make_app, confdir)
+    status = app._status.getvalue()
+    assert "are downgraded" in status, status
     assert "Attribution suppressed" not in status

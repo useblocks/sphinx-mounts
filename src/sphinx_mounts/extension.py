@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 import os
@@ -33,6 +34,7 @@ from sphinx_mounts.config import (
     load_variant_sources_from_toml,
     mount_gate_label,
     mount_label,
+    normalise_condition,
     parse_mounts,
 )
 from sphinx_mounts.logging import MOUNT_GATED_CODE, log_warning
@@ -62,14 +64,30 @@ _CACHED_KEY = "_sphinx_mounts_parsed"
 #: ``builder-inited`` half to act on. See :class:`_VariantState`.
 _VARIANT_STATE_KEY = "_sphinx_mounts_variant_state"
 
-#: Application attribute holding the ``(mount index, condition)`` pairs the
-#: reader at priority 450 actually **decided** this build — gated off or left
-#: live, either way it looked at them.
+#: Application attribute holding a :class:`collections.Counter` over the
+#: NORMALISED condition strings of the gates the reader at priority 450 decided
+#: to gate OFF this build.
 #:
-#: The parser at 500 subtracts this from what it finds, so a gate that reached
-#: it by some other route is reported rather than applied in silence. See
+#: A multiset of strings rather than a set of ``(index, condition)`` pairs: a
+#: mount's position in ``config.mounts`` is not stable across the (450, 500)
+#: window, and pairing on it made a handler that merely REORDERS the list
+#: produce a spurious warning on every build. Duplicate conditions keep their
+#: multiplicity so that an extra mount carrying an already-decided string is
+#: still caught.
+#:
+#: Only the gated-OFF ones: a mount whose condition HELD has its ``if``
+#: stripped, so it carries no ``gated_by`` at 500 and would leave a spare entry
+#: for an interloper to consume.
+#:
+#: The parser at 500 decrements against this, so a gate that reached it by some
+#: other route is reported rather than applied in silence. See
 #: :func:`_report_undecided_gates`.
 _DECIDED_GATES_KEY = "_sphinx_mounts_decided_gates"
+
+#: Application attribute holding the PARSE-list indices the seam at 500
+#: reported as undecided, so :func:`_report_gated_mounts` does not record them
+#: a second time as ordinary gates.
+_UNDECIDED_GATES_KEY = "_sphinx_mounts_undecided_gates"
 
 #: Application attribute caching the resolved TOML path setting, so the
 #: deprecation warning for ``mounts_from_toml`` fires once rather than once per
@@ -174,22 +192,42 @@ def _report_undecided_gates(app: Sphinx, parsed: tuple[MountConfig, ...]) -> Non
     record exists to prevent, reached through the one door the reader does not
     stand in front of.
 
-    Decided gates are recognised by ``(index, condition)`` rather than by index
-    alone, so a handler that REPLACES a mount in that window is caught too. The
-    pairing is still positional, so a handler that *prepends* in that window
-    shifts a decided gate's index and it is reported here as undecided. That is
-    an over-report on a configuration that has already broken the index-keying
-    :func:`_wiring_signature` documents — loud and fail-closed, which is the
-    right direction for the mistake to fall in.
+    Decided gates are recognised by a **multiset of normalised condition
+    strings**, never by position. An earlier version paired on
+    ``(index, condition)`` and justified the resulting over-report as falling
+    only on "a configuration that has already broken the index-keying
+    :func:`_wiring_signature` documents". **That justification was measured
+    false and is retracted.** A deterministic handler that merely *prepends* a
+    computed mount produces a byte-identical ``mounts`` value on every build —
+    exactly the condition the index-keying requires — and every one of those
+    builds collected a spurious ``sphinx-build -W`` failure whose stated reason
+    did not apply to the mount it named.
+
+    The strings come from :func:`~sphinx_mounts.config.normalise_condition`,
+    which is also what produces
+    :attr:`~sphinx_mounts.config.MountConfig.gated_by`, so the two sides are
+    the same string by construction rather than by agreement — which is what
+    stopped a degenerate ``if`` being reported once by the reader as ``''`` and
+    again here as ``"''"``. Matching decrements the count, so N mounts carrying
+    one decided condition consume N entries and an ``N+1``-th is reported.
+
+    What this cannot distinguish is a mount the reader never saw whose ``if``
+    is *character-for-character* one the reader evaluated to FALSE for another
+    mount. Its verdict is right anyway — that condition is false in this
+    variant, so gating the bundle is the correct outcome — and what is lost is
+    only the note that the reader did not personally see that entry. That is
+    the whole of the residual, and it is quieter and rarer than a guaranteed
+    spurious failure on a working project.
     """
-    decided: frozenset[tuple[int, str]] = (
-        getattr(app, _DECIDED_GATES_KEY, None) or frozenset()
-    )
+    decided: Counter[str] = getattr(app, _DECIDED_GATES_KEY, None) or Counter()
+    undecided: list[int] = []
     for index, mount in enumerate(parsed):
         if mount.gated_by is None:
             continue
-        if (index, mount.gated_by) in decided:
+        if decided[mount.gated_by] > 0:
+            decided[mount.gated_by] -= 1
             continue
+        undecided.append(index)
         log_warning(
             logger,
             _unevaluable_gate_message(
@@ -210,6 +248,7 @@ def _report_undecided_gates(app: Sphinx, parsed: tuple[MountConfig, ...]) -> Non
             ),
             "mount_gate_unevaluable",
         )
+    setattr(app, _UNDECIDED_GATES_KEY, frozenset(undecided))
 
 
 def _on_builder_inited(app: Sphinx) -> None:
@@ -808,10 +847,13 @@ class _VariantState:
     #: ``(rule label, authored globs)`` for every FALSE rule, for attributing a
     #: removed mounted file back to the pattern the author can edit.
     false_rules: tuple[tuple[str, tuple[str, ...]], ...]
-    #: ``(mount index, gate label)`` for every mount gated OFF by its own
-    #: ``if``. The docnames themselves come from ``discover()`` rather than
-    #: from here — see :func:`_gated_mount_docnames` for why they have to.
-    mount_gates: tuple[tuple[int, str], ...]
+    #: Whether this reader gated any mount off at all. The gates themselves
+    #: are NOT carried here: their indices are the reader's view of
+    #: ``config.mounts``, and anything writing that value between priorities
+    #: 450 and 500 makes those indices disagree with the ones ``discover()``
+    #: keys its dictionaries by. Both consumers read the PARSED tuple instead,
+    #: so the two sides cannot drift — see :func:`_gated_mount_docnames`.
+    gated_any_mount: bool
 
 
 def _on_load_variants(app: Sphinx, config: Config) -> None:
@@ -869,7 +911,7 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
     5. the folds.
     """
     setattr(app, _VARIANT_STATE_KEY, None)
-    setattr(app, _DECIDED_GATES_KEY, frozenset())
+    setattr(app, _DECIDED_GATES_KEY, Counter())
     # Read BEFORE the stand-down paths below, so that a mount `if` this reader
     # cannot evaluate is decided rather than left on the table for the parser
     # at 500 to fail closed over in silence.
@@ -938,8 +980,11 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
         _fold_into_mounts(app, config, (), gates)
         return
 
-    _mark_gates_decided(app, gates)
     excluding, gated = _false_for_this_variant(rules, gates, variant_data)
+    # AFTER the verdict, and only the gated-off ones: a mount whose condition
+    # held has its `if` stripped, so it carries no `gated_by` for the parser to
+    # match and recording it would leave a spare entry in the multiset.
+    _mark_gates_decided(app, gated)
 
     host_patterns = tuple(
         (rule.label, tuple(_translated_host_patterns(rule))) for rule in excluding
@@ -966,7 +1011,7 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
             base_exclude_patterns=base_exclude,
             narrowed_mounts=narrowed,
             false_rules=tuple((rule.label, rule.files) for rule in excluding),
-            mount_gates=tuple((gate.index, gate.label) for gate in gated),
+            gated_any_mount=bool(gated),
         ),
     )
     logger.info(
@@ -1002,21 +1047,23 @@ def _mount_conditions(config: Config) -> tuple[_MountGate, ...]:
     return tuple(gates)
 
 
-def _mark_gates_decided(app: Sphinx, gates: tuple[_MountGate, ...]) -> None:
-    """Record that this reader looked at these gates, for the parser at 500.
+def _mark_gates_decided(app: Sphinx, gated: tuple[_MountGate, ...]) -> None:
+    """Record the gates this reader decided to gate OFF, for the parser at 500.
 
-    "Decided" covers both verdicts and both stand-downs: what it means is that
-    the gate went through this reader, so the parser does not have to report it
-    as one that reached it by another route.
+    Only the gated-off ones, and the asymmetry is load-bearing. A mount whose
+    condition HELD has its ``if`` stripped from the table, so it reaches the
+    parser with no ``gated_by`` at all and matches nothing — recording it would
+    leave a spare entry in the multiset for a mount the reader never saw to
+    consume, which is the one way an unevaluated gate could still pass silently.
+
+    Keyed by :func:`~sphinx_mounts.config.normalise_condition`, the same
+    function that produces the ``gated_by`` the parser compares against, so the
+    two sides cannot spell one value two different ways.
     """
     setattr(
         app,
         _DECIDED_GATES_KEY,
-        frozenset(
-            (gate.index, gate.condition)
-            for gate in gates
-            if isinstance(gate.condition, str)
-        ),
+        Counter(normalise_condition(gate.condition) for gate in gated),
     )
 
 
@@ -1075,7 +1122,30 @@ def _report_unevaluable_gates(
         )
 
 
-def _report_gated_mounts(app: Sphinx, state: _VariantState) -> None:
+def _gated_mounts(app: Sphinx) -> list[tuple[int, str]]:
+    """``(parse index, gate label)`` for every gated-off mount, in list order.
+
+    Read off the PARSED tuple — the same list ``_MountAwareProject`` enumerates
+    to key ``_gated_entry_docnames`` and ``_gated_skips`` — rather than off the
+    reader's own view of ``config.mounts``. Anything that writes that value
+    between priorities 450 and 500 shifts the reader's indices out from under
+    the discovery dictionaries, and the two consumers below would then be
+    talking about different mounts: the label would name one and the docnames
+    another, so a perfectly ordinary gated bundle would attribute nothing.
+
+    Gates the parse seam already reported as undecided are excluded, so a mount
+    nothing evaluated collects one diagnostic rather than two.
+    """
+    parsed: tuple[MountConfig, ...] = getattr(app, _CACHED_KEY, ())
+    undecided: frozenset[int] = getattr(app, _UNDECIDED_GATES_KEY, None) or frozenset()
+    return [
+        (index, mount_gate_label(index, mount.gated_by))
+        for index, mount in enumerate(parsed)
+        if mount.gated_by is not None and index not in undecided
+    ]
+
+
+def _report_gated_mounts(app: Sphinx) -> None:
     """Record every gated-off mount, whether or not anything references it.
 
     The record is the whole mitigation for this key's one genuinely nasty
@@ -1094,33 +1164,39 @@ def _report_gated_mounts(app: Sphinx, state: _VariantState) -> None:
     Emitted from ``env-before-read-docs`` rather than from the reader at 450,
     because that is the first point where both halves of the record exist. The
     gate is a configuration fact; whether its attribution survived is a
-    DISCOVERY fact, and a contested gated mount is the one shape where the two
-    disagree — the bundle is gated *and* its pages are reported as ordinary
-    missing documents. Emitting the record before ``discover()`` had run meant
-    the log stated the first half and left the second to a bare
-    ``toc.not_readable`` with nothing joining them.
+    DISCOVERY fact, and they can disagree — every whole-mount skip the gated
+    pipeline takes empties the attribution while the bundle is still gated.
+
+    **The downgrade is promised only when it happened.** The closing clause
+    used to be unconditional, which made it false for every one of those skips:
+    a contested docname, an occupied ``strict_mount_at``, a bundle root that is
+    not on disk, a listed file with no registered suffix. In each the user gets
+    a bare ``toc.not_readable`` — under a log line that had just told them the
+    reference was downgraded. The absent-root case is the sharpest, because "a
+    bundle its CI has not checked out" is the reason that skip is silent in the
+    first place.
     """
     project = getattr(app, "project", None)
-    contests: dict[int, str] = getattr(project, "_gated_contests", {})
-    for index, label in state.mount_gates:
-        contested = contests.get(index)
-        note = (
-            ""
-            if contested is None
-            else (
-                f" Attribution suppressed: docname(s) contested by the live "
-                f"build (first: {contested!r}), so toctree references into "
-                f"this bundle are reported as ordinary missing-document "
+    skips: dict[int, str] = getattr(project, "_gated_skips", {})
+    produced: dict[int, list[str]] = getattr(project, "_gated_entry_docnames", {})
+    for index, label in _gated_mounts(app):
+        reason = skips.get(index)
+        if produced.get(index):
+            tail = " Toctree references to its pages are downgraded."
+        elif reason is not None:
+            tail = (
+                f" Attribution suppressed ({reason}), so toctree references "
+                f"into this bundle are reported as ordinary missing-document "
                 f"warnings rather than downgraded."
             )
-        )
+        else:
+            tail = ""
         logger.info(
             "sphinx-mounts: %s is false for this variant, so the whole mount "
-            "is gated off — it contributes no documents, wires nothing into a "
-            "host toctree, and toctree references to its pages are "
-            "downgraded.%s [%s]",
+            "is gated off — it contributes no documents and wires nothing into "
+            "a host toctree.%s [%s]",
             label,
-            note,
+            tail,
             MOUNT_GATED_CODE,
         )
 
@@ -1413,7 +1489,7 @@ def _guard_mispointed_needs(  # noqa: PLR0913
     declared, consequence = _declared_gating_keys(spec, gates)
     msg = (
         f"sphinx-mounts: `{spec.toml_path}` declares `[needs] variant_data` "
-        f"and {declared}, but {where}, so it resolved an EMPTY variant map. "
+        f"and {declared}, but {where}, so it resolved an EMPTY variant map: "
         f"{consequence}, and the whole gated document set would silently "
         f"disappear.\n"
         f"Point sphinx-needs at the same file, in conf.py:\n"
@@ -1853,7 +1929,7 @@ def _on_install_variant_filter(app: Sphinx, _env: Any, _docnames: list[str]) -> 
     if state is None:
         mount_warnings.remove_downgrade_filters()
         return
-    _report_gated_mounts(app, state)
+    _report_gated_mounts(app)
     cached = getattr(app, _VARIANT_ATTRIBUTION_KEY, None)
     if cached is not None and cached[0] is state:
         walked = cached[1]
@@ -1874,7 +1950,7 @@ def _on_install_variant_filter(app: Sphinx, _env: Any, _docnames: list[str]) -> 
     # snapshot of it would go stale the moment a bundle's file set changed
     # under a long-lived application (sphinx-autobuild, a multi-build script).
     excluded = dict(walked)
-    excluded.update(_gated_mount_docnames(app, state))
+    excluded.update(_gated_mount_docnames(app))
     if not excluded:
         mount_warnings.remove_downgrade_filters()
         return
@@ -1896,7 +1972,7 @@ def _on_install_variant_filter(app: Sphinx, _env: Any, _docnames: list[str]) -> 
     )
 
 
-def _gated_mount_docnames(app: Sphinx, state: _VariantState) -> dict[str, str]:
+def _gated_mount_docnames(app: Sphinx) -> dict[str, str]:
     """Docnames a gated-off mount would have provided, each mapped to its gate.
 
     Read straight off ``discover()``'s own second pass rather than recomputed
@@ -1919,12 +1995,16 @@ def _gated_mount_docnames(app: Sphinx, state: _VariantState) -> dict[str, str]:
     both have supplied a docname the lower-numbered one owns the attribution.
     The document is genuinely absent either way, so only the label is at stake
     — but an arbitrary label would make the message depend on iteration order.
+
+    The gates come from :func:`_gated_mounts`, i.e. from the PARSED tuple, so
+    the index the label is built from and the index the dictionary is keyed by
+    are the same number by construction.
     """
     produced: dict[int, list[str]] = getattr(
         getattr(app, "project", None), "_gated_entry_docnames", {}
     )
     excluded: dict[str, str] = {}
-    for index, label in state.mount_gates:
+    for index, label in _gated_mounts(app):
         for docname in produced.get(index, ()):
             excluded.setdefault(docname, label)
     return excluded
