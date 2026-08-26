@@ -221,6 +221,15 @@ class _MountAwareProject(Project):
         self._doc_roots = {}
         self._mount_entry_docnames = {}
         for index, mount in enumerate(self._mounts):
+            if mount.gated_by is not None:
+                # The mount's own `if` is false for this variant, so the whole
+                # bundle is out: no walk, no docnames, no confinement roots,
+                # and nothing for `_wired_entries` to wire. Recorded as
+                # "produced nothing" rather than omitted, so that
+                # `_wiring_signature` still sees the index and a gating flip
+                # registers as a change.
+                self._mount_entry_docnames[index] = []
+                continue
             if _enforce_strict_mount_at(Path(self.srcdir), mount, index):
                 # strict_mount_at violation — the whole mount is skipped,
                 # so the host project stays completely untouched.

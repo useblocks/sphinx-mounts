@@ -21,6 +21,9 @@ from sphinx.util.matching import get_matching_files, patmatch
 from sphinx_mounts import __version__, dialect
 from sphinx_mounts import warnings as mount_warnings
 from sphinx_mounts.config import (
+    MOUNT_CONDITION_KEY,
+    NAMESPACED_MOUNTS_LOCATION,
+    VARIANT_SOURCES_LOCATION,
     MountConfig,
     TomlConfigError,
     VariantRule,
@@ -28,10 +31,11 @@ from sphinx_mounts.config import (
     VariantSourcesConfig,
     load_mounts_from_toml,
     load_variant_sources_from_toml,
+    mount_gate_label,
     mount_label,
     parse_mounts,
 )
-from sphinx_mounts.logging import log_warning
+from sphinx_mounts.logging import MOUNT_GATED_CODE, log_warning
 from sphinx_mounts.mounter import (
     DocRoot,
     _build_walker,
@@ -412,13 +416,21 @@ def _select_or_create_toctree(  # noqa: PLR0913
 
 
 def _on_check_consistency(app: Sphinx, env: Any) -> None:
-    """Warn when ``attach_to`` targets a docname that does not exist."""
+    """Warn when ``attach_to`` targets a docname that does not exist.
+
+    A mount gated off by its own ``if`` is skipped: it wires nothing into any
+    toctree in this variant, so its ``attach_to`` names a host doc that nothing
+    was going to be attached to. Reporting it would be a warning about work
+    that was never attempted, and ``-W`` would fail a correctly gated build
+    over it. The same typo is still reported in every variant where the mount
+    is live.
+    """
     parsed: tuple[MountConfig, ...] = getattr(app, _CACHED_KEY, ())
     if not parsed:
         return
     found = set(env.found_docs)
     for index, mount in enumerate(parsed):
-        if mount.attach_to is None:
+        if mount.attach_to is None or mount.gated_by is not None:
             continue
         if mount.attach_to not in found:
             msg = (
@@ -662,7 +674,7 @@ def _is_explicit(config: Config, name: str) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
-class _GatedMount:
+class _NarrowedMount:
     """A mount whose file set a variant rule narrowed, and how.
 
     Kept so ``builder-inited`` can walk the mount **as it would have been**
@@ -670,6 +682,11 @@ class _GatedMount:
     excluded file is pruned at the walk, so nothing downstream can tell it from
     a file that was never written. That is the property the feature wants, and
     also why the attribution has to be computed rather than inferred.
+
+    *Narrowed*, never *gated*: a rule takes files out of a mount that is still
+    in the build, while a mount ``if`` (:class:`_MountGate`) takes the whole
+    bundle out. The two live side by side in this module and their attribution
+    paths have nothing in common, so they do not share a word.
     """
 
     index: int
@@ -682,6 +699,28 @@ class _GatedMount:
 
 
 @dataclass(frozen=True, slots=True)
+class _MountGate:
+    """One mount entry's ``if`` condition, as authored.
+
+    Whole-bundle gating: the condition decides whether the mount contributes
+    anything at all, so there is nothing per-file to record here and no glob to
+    anchor — which is why a project may gate mounts in a layout where
+    :func:`_guard_layout` would refuse a rule.
+    """
+
+    index: int
+    #: The value exactly as written. Typed ``Any`` because a TOML file may
+    #: carry anything here, and a non-string is one of the offenders the
+    #: shared validator refuses the whole configuration over.
+    condition: Any
+
+    @property
+    def label(self) -> str:
+        """Human-readable identifier used in every message about this gate."""
+        return mount_gate_label(self.index, self.condition)
+
+
+@dataclass(frozen=True, slots=True)
 class _VariantState:
     """What the config-time reader decided, for the build-time half to use."""
 
@@ -690,14 +729,18 @@ class _VariantState:
     #: ``config.exclude_patterns`` as it was *before* the fold.
     base_exclude_patterns: tuple[str, ...]
     #: Every mount a rule narrowed.
-    gated_mounts: tuple[_GatedMount, ...]
+    narrowed_mounts: tuple[_NarrowedMount, ...]
     #: ``(rule label, authored globs)`` for every FALSE rule, for attributing a
     #: removed mounted file back to the pattern the author can edit.
     false_rules: tuple[tuple[str, tuple[str, ...]], ...]
+    #: ``(mount index, gate label)`` for every mount gated OFF by its own
+    #: ``if``. The docnames themselves come from ``discover()`` rather than
+    #: from here — see :func:`_gated_mount_docnames` for why they have to.
+    mount_gates: tuple[tuple[int, str], ...]
 
 
 def _on_load_variants(app: Sphinx, config: Config) -> None:
-    """Read ``[[source.variant_sources]]`` and fold its verdict into config VALUES.
+    """Read the two variant-gating keys and fold their verdict into config VALUES.
 
     Runs at ``config-inited`` priority **450**, the only slot that satisfies
     all three constraints, every one of them measured:
@@ -711,55 +754,83 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
       :class:`~sphinx_mounts.config.MountConfig` s, so the fold is invisible to
       everything downstream.
 
+    **Two keys, one fold.** ``[[source.variant_sources]]`` narrows the file set
+    by glob; ``if`` on a ``[[source.mounts]]`` entry gates a whole bundle. They
+    share a grammar, a validator and an interpreter, and they are decided
+    together here so that one hard error can list the offenders from both — two
+    error paths for one grammar could disagree.
+
     **The verdict is folded into config VALUES, not applied later.** Host-arm
     patterns are appended to ``config.exclude_patterns``; mount-arm patterns are
-    appended to each raw mount table's ``exclude`` (or filter its ``files``),
-    and ``config["mounts"]`` is reassigned so the value really changes. Both
-    confvals are ``rebuild="env"``, so a gating flip is a config change Sphinx
-    already knows how to converge — it re-reads every document, in both
-    directions, on the build where the flip happened. A reader that gated
-    without touching a config value leaves both values byte-identical across a
-    flip and needs an invalidation story of its own.
+    appended to each raw mount table's ``exclude`` (or filter its ``files``); a
+    mount whose own ``if`` is false keeps that key as its gate marker while
+    every mount whose ``if`` holds has it stripped; and ``config["mounts"]`` is
+    reassigned so the value really changes. Both confvals are ``rebuild="env"``,
+    so a gating flip is a config change Sphinx already knows how to converge —
+    it re-reads every document, in both directions, on the build where the flip
+    happened. A reader that gated without touching a config value leaves both
+    values byte-identical across a flip and needs an invalidation story of its
+    own.
+
+    **The strip is not cosmetic.** ``MountConfig.from_dict`` reports every key
+    it does not model as ``mounts.unknown_key``, which is a *warning*, so
+    leaving ``if`` on a mount whose condition holds would fail
+    ``sphinx-build -W`` on a correctly gated project. ``if`` cannot become a
+    dataclass field either — it is a Python keyword.
 
     Order matters and is the same order ubCode uses:
 
     1. the glob-dialect refusals and the layout guard, which are
        variant-**independent** — a pattern this key cannot interpret, or a
-       layout no pattern can be anchored in, is unusable in every variant;
+       layout no pattern can be anchored in, is unusable in every variant.
+       Both are about rule GLOBS, so both are scoped to a project that declares
+       rules: a mount ``if`` anchors nothing and a project that only gates
+       mounts is legal wherever its ``ubproject.toml`` sits;
     2. the variant map;
-    3. condition validation (hard) and evaluation (warn-and-exclude);
+    3. condition validation (hard) and evaluation (warn-and-gate-off), for both
+       keys at once;
     4. the root-document guard, which is variant-**dependent** — a rule
        matching the root document is perfectly legal while its condition holds;
-    5. the two folds.
+    5. the folds.
     """
     setattr(app, _VARIANT_STATE_KEY, None)
+    # Read BEFORE the stand-down paths below, so that a mount `if` this reader
+    # cannot evaluate is decided rather than left on the table for the parser
+    # at 500 to fail closed over in silence.
+    gates = _mount_conditions(config)
     setting = _resolve_toml_setting(app, config)
-    if not setting:
-        return
-    toml_path = (Path(app.confdir) / setting).resolve()
-    spec = load_variant_sources_from_toml(toml_path)
-    if spec is None or not spec.rules:
+    spec = None
+    if setting:
+        toml_path = (Path(app.confdir) / setting).resolve()
+        spec = load_variant_sources_from_toml(toml_path)
+    if spec is None:
+        _report_unevaluable_gates(
+            gates,
+            "`sources_from_toml` is set to None, so nothing is read from TOML"
+            if not setting
+            else f"`{setting}` does not exist beside conf.py",
+        )
         return
 
     rules = _usable_rules(spec)
-    if not rules:
+    if not rules and not gates:
         return
-    _refuse_glob_dialects(rules, toml_path)
-    _guard_layout(app, config, spec, rules)
+    if rules:
+        _refuse_glob_dialects(rules, spec.toml_path)
+        _guard_layout(app, config, spec, rules)
 
     variant_data = _resolve_variant_map(app, config, spec)
     if variant_data is None:
         # sphinx-needs owns the failure and will report it; see
-        # `_resolve_variant_map`.
+        # `_resolve_variant_map`. The mount gates still have to be decided —
+        # a gating key left undecided is a gating key that publishes.
+        _report_unevaluable_gates(
+            gates, "the variant data could not be read (sphinx-needs reports it)"
+        )
+        _fold_into_mounts(app, config, (), gates)
         return
 
-    excluding = _excluding_rules(rules, variant_data)
-    if not excluding:
-        logger.info(
-            "sphinx-mounts: every `variant_sources` rule holds for this "
-            "variant; the document set is unchanged."
-        )
-        return
+    excluding, gated = _false_for_this_variant(rules, gates, variant_data)
 
     host_patterns = tuple(
         (rule.label, tuple(_translated_host_patterns(rule))) for rule in excluding
@@ -769,7 +840,15 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
     base_exclude = tuple(config.exclude_patterns)
     appended = [pattern for _, patterns in host_patterns for pattern in patterns]
     config.exclude_patterns = [*config.exclude_patterns, *appended]
-    gated = _fold_into_mounts(app, config, excluding)
+    narrowed = _fold_into_mounts(app, config, excluding, gated)
+    _report_gated_mounts(gated)
+
+    if not excluding and not gated:
+        logger.info(
+            "sphinx-mounts: every variant condition holds for this variant; "
+            "the document set is unchanged."
+        )
+        return
 
     setattr(
         app,
@@ -777,18 +856,106 @@ def _on_load_variants(app: Sphinx, config: Config) -> None:
         _VariantState(
             host_patterns=host_patterns,
             base_exclude_patterns=base_exclude,
-            gated_mounts=gated,
+            narrowed_mounts=narrowed,
             false_rules=tuple((rule.label, rule.files) for rule in excluding),
+            mount_gates=tuple((gate.index, gate.label) for gate in gated),
         ),
     )
     logger.info(
         "sphinx-mounts: %d of %d `variant_sources` rule(s) exclude for this "
-        "variant; %d exclude_patterns entr(ies) added, %d mount(s) narrowed.",
+        "variant; %d exclude_patterns entr(ies) added, %d mount(s) narrowed, "
+        "%d of %d mount(s) gated off.",
         len(excluding),
         len(rules),
         len(appended),
+        len(narrowed),
         len(gated),
+        len(gates),
     )
+
+
+def _mount_conditions(config: Config) -> tuple[_MountGate, ...]:
+    """Every mount entry that declares an ``if``, in config-list order.
+
+    Reads the RAW tables, before :func:`_on_config_inited` parses them at 500,
+    which is the only point where the key is still visible under its authored
+    name.
+
+    A ``conf.py``-declared :class:`~sphinx_mounts.config.MountConfig` *instance*
+    is skipped rather than searched, because it cannot carry a condition: ``if``
+    is a Python keyword, so no dataclass field can be named for it. A ``conf.py``
+    mount written as a plain mapping is read here like any other — TOML is the
+    primary config target, but the limitation is the dataclass's, not the route's.
+    """
+    gates: list[_MountGate] = []
+    for index, entry in enumerate(getattr(config, "mounts", None) or ()):
+        if isinstance(entry, Mapping) and MOUNT_CONDITION_KEY in entry:
+            gates.append(_MountGate(index=index, condition=entry[MOUNT_CONDITION_KEY]))
+    return tuple(gates)
+
+
+def _report_unevaluable_gates(gates: tuple[_MountGate, ...], reason: str) -> None:
+    """Report every mount ``if`` this reader could not evaluate.
+
+    Reachable on the three paths where the reader stands down with mounts still
+    configured: the TOML file it reads does not exist, ``sources_from_toml`` is
+    ``None`` so nothing is read from TOML at all, or the variant map itself is
+    unreadable and sphinx-needs owns that failure. On the first two the mounts
+    came from ``conf.py`` — a TOML-declared mount cannot be in ``config.mounts``
+    without the file the loader at 400 read it from.
+
+    The mount is gated **off** on all three; that is
+    :attr:`~sphinx_mounts.config.MountConfig.gated_by`'s fail-closed reading of
+    a surviving ``if``, and it is the only defensible one for a key whose
+    purpose is keeping content out. What this adds is the sentence saying so,
+    because the alternative is a bundle that silently disappears.
+
+    A warning rather than a hard error, matching what an unevaluable *rule*
+    condition does: reported, and what it gates is excluded. ``-W`` escalates
+    it, which is right — this is a misconfiguration, not a variant.
+
+    :param reason: Why the condition could not be evaluated, as a clause. The
+        caller knows which of the three it is and no two of them share a
+        remedy, so guessing from ``sources_from_toml`` here would describe the
+        wrong problem on two of the three.
+    """
+    for gate in gates:
+        msg = (
+            f"sphinx-mounts: {gate.label} declares a condition, but {reason}, "
+            f"so there is no variant data to evaluate it against. The whole "
+            f"mount is gated OFF — the safe direction for a key whose purpose "
+            f"is keeping content out of the build. Declare the mount in the "
+            f"TOML file this extension reads, or remove the "
+            f"`{MOUNT_CONDITION_KEY}`. [mounts.mount_gate_unevaluable]"
+        )
+        log_warning(logger, msg, "mount_gate_unevaluable")
+
+
+def _report_gated_mounts(gated: tuple[_MountGate, ...]) -> None:
+    """Record every gated-off mount, whether or not anything references it.
+
+    The record is the whole mitigation for this key's one genuinely nasty
+    failure shape. A gated-off bundle is a large, silent absence: unlike a rule,
+    which names a glob the author wrote beside the files it removed, a mount
+    ``if`` can remove hundreds of pages that live in another repository, and if
+    nothing in the host project happens to reference them there is no other
+    signal at all. "Where did my 400 pages go" has to be answerable from the
+    build log.
+
+    INFO rather than a warning, and deliberately so: gating is what the author
+    asked for. A warning would fail ``sphinx-build -W`` on every correctly
+    configured variant build, which is the same trap the toctree downgrade
+    exists to close.
+    """
+    for gate in gated:
+        logger.info(
+            "sphinx-mounts: %s is false for this variant, so the whole mount "
+            "is gated off — it contributes no documents, wires nothing into a "
+            "host toctree, and toctree references to its pages are downgraded. "
+            "[%s]",
+            gate.label,
+            MOUNT_GATED_CODE,
+        )
 
 
 def _usable_rules(spec: VariantSourcesConfig) -> tuple[VariantRule, ...]:
@@ -863,6 +1030,15 @@ def _guard_layout(
 
     Variant-independent, so it runs before any condition is evaluated: a layout
     no pattern can be anchored in is wrong in every variant.
+
+    **Scoped to projects that declare rules**, and the caller enforces that by
+    not calling this at all otherwise. The guard exists because a rule GLOB has
+    to be re-expressible as an ``exclude_patterns`` entry anchored at
+    ``srcdir``. A mount ``if`` carries no glob — it gates a whole bundle — so a
+    project that only gates mounts has nothing to anchor and nothing to get
+    wrong. Refusing it would refuse a configuration with nothing wrong with it,
+    in a layout (``conf.py`` in ``docs/``, sources in ``docs/source/``) that is
+    perfectly ordinary.
     """
     srcdir = Path(app.srcdir).resolve()
     if spec.source_root == srcdir:
@@ -1081,62 +1257,107 @@ def _anchor_data_file(raw: Any, confdir: Path) -> Path | None:
     return (confdir / candidate).resolve()
 
 
-def _excluding_rules(
-    rules: tuple[VariantRule, ...], variant_data: dict[str, Any]
-) -> tuple[VariantRule, ...]:
-    """Return the rules that are FALSE, i.e. the ones that exclude their files.
+def _false_for_this_variant(
+    rules: tuple[VariantRule, ...],
+    gates: tuple[_MountGate, ...],
+    variant_data: dict[str, Any],
+) -> tuple[tuple[VariantRule, ...], tuple[_MountGate, ...]]:
+    """Split both keys into the entries that gate and the entries that do not.
 
     *Every rule whose condition is false excludes its files; a file no false
     rule matches is unaffected.* Equivalently: a file is in the build unless
     some rule matching it is false, which is an AND over the conditions of all
-    rules matching it. Order-independent, and rules only ever narrow.
+    rules matching it. Order-independent, and rules only ever narrow. A mount
+    ``if`` reads the same way with the bundle in place of the files.
+
+    The two keys go through :func:`_excluding_conditions` **together**, in one
+    call, so that a configuration with an offender in each is refused once
+    naming both rather than twice naming one.
+    """
+    labelled: list[tuple[str, Any]] = [(rule.label, rule.condition) for rule in rules]
+    labelled += [(gate.label, gate.condition) for gate in gates]
+    verdicts = _excluding_conditions(labelled, variant_data)
+    excluding = tuple(
+        rule
+        for rule, excludes in zip(rules, verdicts[: len(rules)], strict=True)
+        if excludes
+    )
+    gated = tuple(
+        gate
+        for gate, excludes in zip(gates, verdicts[len(rules) :], strict=True)
+        if excludes
+    )
+    return excluding, gated
+
+
+def _excluding_conditions(
+    labelled: list[tuple[str, Any]], variant_data: dict[str, Any]
+) -> tuple[bool, ...]:
+    """For each ``(label, condition)``: does that condition GATE for this variant?
+
+    One function over ``(label, condition)`` pairs rather than one per key, so
+    that the two variant-gating keys cannot drift into two grammars, two
+    validators or two failure postures. The label is the only thing that
+    differs between them, and the label is a parameter.
 
     Two failure modes, on opposite sides of the line:
 
     * a condition **outside the grammar** is a hard error, listing every
-      offender at once. It is statically knowable, so it is a configuration
-      mistake rather than something to evaluate;
+      offender from **either** key at once. It is statically knowable, so it is
+      a configuration mistake rather than something to evaluate. A non-string
+      condition is listed the same way — reachable only from a mount table,
+      since the rule loader already rejects one;
     * a condition inside the grammar that cannot be **evaluated** — an unknown
-      ``var.*`` key, a type mismatch — is reported and the rule EXCLUDES. That
-      is the warn-and-exclude contract the ``.. if::`` directive already has,
-      and the safe direction for a key whose purpose is keeping content out.
+      ``var.*`` key, a type mismatch — is reported and it GATES. That is the
+      warn-and-exclude contract the ``.. if::`` directive already has, and the
+      safe direction for a key whose purpose is keeping content out.
+
+    :return: One verdict per input pair, in input order. ``True`` means the
+        condition is false for this variant, i.e. what it gates is removed.
     """
     offenders: list[str] = []
-    validated: list[tuple[VariantRule, Any]] = []
-    for rule in rules:
+    validated: list[tuple[str, Any]] = []
+    for label, condition in labelled:
+        if not isinstance(condition, str):
+            offenders.append(
+                f"  {label}: the condition must be a string; got "
+                f"{type(condition).__name__}."
+            )
+            continue
         try:
-            validated.append((rule, validate(rule.condition)))
+            validated.append((label, validate(condition)))
         except VariantConditionError as exc:
-            offenders.append(f"  {rule.label}: {exc}")
+            offenders.append(f"  {label}: {exc}")
     if offenders:
         listed = "\n".join(offenders)
         msg = (
-            f"sphinx-mounts: {len(offenders)} `variant_sources` condition(s) "
-            f"are outside the rule grammar, so the configuration is "
+            f"sphinx-mounts: {len(offenders)} variant condition(s) are outside "
+            f"the condition grammar, so the configuration is "
             f"refused:\n{listed}\n"
-            f"A rule condition is comparisons, `in` / `not in`, `is None` / "
+            f"A condition is comparisons, `in` / `not in`, `is None` / "
             f"`is not None`, `.startswith(…)` / `.endswith(…)`, `and` / `or` / "
             f"`not`, parentheses, nested `var.*` access and the literals "
             f"`True` / `False`. It must be boolean-valued and every field "
-            f"reference must be rooted at `var`."
+            f"reference must be rooted at `var`. The same grammar applies to a "
+            f"`{VARIANT_SOURCES_LOCATION}` rule and to `{MOUNT_CONDITION_KEY}` "
+            f"on a `{NAMESPACED_MOUNTS_LOCATION}` entry."
         )
         raise VariantRuleError(msg)
-    excluding: list[VariantRule] = []
-    for rule, tree in validated:
+    verdicts: list[bool] = []
+    for label, tree in validated:
         try:
             holds = interpret(tree, variant_data)
         except VariantEvalError as exc:
             msg = (
-                f"sphinx-mounts: {rule.label} could not be evaluated against "
-                f"the variant data: {exc}. The rule's files are excluded — the "
-                f"safe direction for a rule whose purpose is keeping content "
-                f"out of the build."
+                f"sphinx-mounts: {label} could not be evaluated against the "
+                f"variant data: {exc}. What it gates is excluded — the safe "
+                f"direction for a key whose purpose is keeping content out of "
+                f"the build."
             )
             log_warning(logger, msg, "variant_rule_unevaluable")
             holds = False
-        if not holds:
-            excluding.append(rule)
-    return tuple(excluding)
+        verdicts.append(not holds)
+    return tuple(verdicts)
 
 
 def _translated_host_patterns(rule: VariantRule) -> list[str]:
@@ -1226,9 +1447,26 @@ def _source_suffixes(app: Sphinx, config: Config) -> tuple[str, ...]:
 
 
 def _fold_into_mounts(
-    app: Sphinx, config: Config, excluding: tuple[VariantRule, ...]
-) -> tuple[_GatedMount, ...]:
-    """Fold the FALSE rules into the mount tables, then reassign the value.
+    app: Sphinx,
+    config: Config,
+    excluding: tuple[VariantRule, ...],
+    gated: tuple[_MountGate, ...],
+) -> tuple[_NarrowedMount, ...]:
+    """Fold both keys' verdicts into the mount tables, then reassign the value.
+
+    **The mount gate first, because it subsumes the rule fold.** A mount whose
+    own ``if`` is false contributes nothing at all, so narrowing its file set
+    would be work with no observable effect — and worse, it would record a
+    :class:`_NarrowedMount` whose attribution walk runs on every build to
+    attribute documents that the gate has already removed. Its entry is passed
+    through **untouched**, so its ``if`` survives as the gate marker
+    :attr:`~sphinx_mounts.config.MountConfig.gated_by` reads at 500.
+
+    Every other entry has ``if`` **stripped**, whether or not any rule
+    excludes. That strip is the whole reason this function now runs on a build
+    with no false rules at all: leaving the key on a mount whose condition
+    holds makes ``MountConfig.from_dict`` report ``mounts.unknown_key``, which
+    is a warning, which fails ``sphinx-build -W`` on a correctly gated project.
 
     Two code paths for two mount modes, as everywhere else in this extension:
 
@@ -1237,16 +1475,23 @@ def _fold_into_mounts(
       every ``include`` is added before every ``exclude``, so an appended
       variant exclude beats any user ``include`` — which is exactly the
       "rules only narrow" semantics wanted.
-    * **file-list mode is NOT gated at all**, and that is parity rather than a
-      gap. ubCode cannot gate one either: a ``files`` mount's entries are
-      pushed straight into its result with no include or exclude consulted, and
-      a variant rule reaches its discovery only through ``extend_exclude``, so
-      **no rule can remove a file-list mount's document under any spelling
-      there** (``rust/ubc_config/src/resolved.rs``). Gating one here — by
-      basename, which is what this reader used to do — was a divergence in the
-      removes-more-here direction, and it is the one thing this key must never
-      be: two readers, two document sets, from one rule string. Use a directory
-      mount for a bundle that has to be gateable.
+    * **a file-list mount is not NARROWED by a rule**, and that is parity
+      rather than a gap. ubCode cannot narrow one either: a ``files`` mount's
+      entries are pushed straight into its result with no include or exclude
+      consulted, and a variant rule reaches its discovery only through
+      ``extend_exclude``, so **no rule can remove a file-list mount's document
+      under any spelling there** (``rust/ubc_config/src/resolved.rs``). Gating
+      one here — by basename, which is what this reader used to do — was a
+      divergence in the removes-more-here direction, and it is the one thing
+      this key must never be: two readers, two document sets, from one rule
+      string.
+
+      A whole-mount ``if`` is a different question with a different answer: it
+      gates a file-list mount exactly as it gates a directory one, in both
+      readers, because dropping a whole bundle touches neither ``include`` nor
+      ``exclude``. The gate branch above is mode-blind by construction, which
+      is the whole of the implementation. What stays unsupported is per-FILE
+      rule gating of a file-list mount.
 
     ``config["mounts"]`` is reassigned at the end even though the entries were
     mutated in place, because it is the config *value* changing that makes a
@@ -1256,24 +1501,34 @@ def _fold_into_mounts(
     if not raw:
         return ()
     confdir = Path(app.confdir)
-    gated: list[_GatedMount] = []
+    gated_indices = {gate.index for gate in gated}
+    narrowed: list[_NarrowedMount] = []
     folded: list[Any] = []
     for index, entry in enumerate(raw):
+        if index in gated_indices:
+            # Untouched, `if` and all: the key IS the marker at 500, and a
+            # bundle that is not in the build has no file set to narrow.
+            folded.append(entry)
+            continue
         if isinstance(entry, Mapping):
-            new_entry, record = _fold_into_mount_entry(
-                dict(entry), index, excluding, confdir
-            )
-        elif isinstance(entry, MountConfig):
-            new_entry, record = _fold_into_mount_config(
-                entry, index, excluding, confdir
-            )
+            live: Any = dict(entry)
+            live.pop(MOUNT_CONDITION_KEY, None)
         else:
-            new_entry, record = entry, None
+            live = entry
+        if not excluding:
+            folded.append(live)
+            continue
+        if isinstance(live, Mapping):
+            new_entry, record = _fold_into_mount_entry(live, index, excluding, confdir)
+        elif isinstance(live, MountConfig):
+            new_entry, record = _fold_into_mount_config(live, index, excluding, confdir)
+        else:
+            new_entry, record = live, None
         folded.append(new_entry)
         if record is not None:
-            gated.append(record)
+            narrowed.append(record)
     config["mounts"] = folded
-    return tuple(gated)
+    return tuple(narrowed)
 
 
 def _fold_into_mount_entry(
@@ -1281,7 +1536,7 @@ def _fold_into_mount_entry(
     index: int,
     excluding: tuple[VariantRule, ...],
     confdir: Path,
-) -> tuple[dict[str, Any], _GatedMount | None]:
+) -> tuple[dict[str, Any], _NarrowedMount | None]:
     """Fold into one raw TOML mount table."""
     mount_at = entry.get("mount_at")
     mount_at = mount_at.strip("/") if isinstance(mount_at, str) else None
@@ -1293,7 +1548,7 @@ def _fold_into_mount_entry(
             for pattern in rule.files
         ]
         entry["exclude"] = [*before, *added]
-        return entry, _GatedMount(
+        return entry, _NarrowedMount(
             index=index,
             mount_at=mount_at,
             dir=(
@@ -1306,7 +1561,9 @@ def _fold_into_mount_entry(
             excludes_before=before,
             excludes_after=tuple(entry["exclude"]),
         )
-    # A file-list mount is left completely alone; see `_fold_into_mounts`.
+    # A file-list mount is never NARROWED by a rule; see `_fold_into_mounts`.
+    # Its whole-mount `if` gate is handled by that function's own loop, and
+    # is mode-blind.
     return entry, None
 
 
@@ -1315,7 +1572,7 @@ def _fold_into_mount_config(
     index: int,
     excluding: tuple[VariantRule, ...],
     confdir: Path,
-) -> tuple[MountConfig, _GatedMount | None]:
+) -> tuple[MountConfig, _NarrowedMount | None]:
     """Fold into a ``conf.py``-declared :class:`MountConfig`.
 
     The legacy path carries dataclass instances rather than tables, so the fold
@@ -1330,7 +1587,7 @@ def _fold_into_mount_config(
             for pattern in rule.files
         )
         updated = replace(mount, exclude=(*mount.exclude, *added))
-        return updated, _GatedMount(
+        return updated, _NarrowedMount(
             index=index,
             mount_at=mount.mount_at,
             dir=_anchor_at_confdir(mount.dir, confdir),
@@ -1339,7 +1596,9 @@ def _fold_into_mount_config(
             excludes_before=mount.exclude,
             excludes_after=updated.exclude,
         )
-    # A file-list mount is left completely alone; see `_fold_into_mounts`.
+    # A file-list mount is never NARROWED by a rule; see `_fold_into_mounts`.
+    # Its whole-mount `if` gate is handled by that function's own loop, and
+    # is mode-blind.
     return mount, None
 
 
@@ -1387,10 +1646,15 @@ def _on_install_variant_filter(app: Sphinx, _env: Any, _docnames: list[str]) -> 
         return
     cached = getattr(app, _VARIANT_ATTRIBUTION_KEY, None)
     if cached is not None and cached[0] is state:
-        excluded = cached[1]
+        excluded = dict(cached[1])
     else:
         suffixes = tuple(app.project.source_suffix)
-        excluded = _host_excluded_docnames(app, state, suffixes)
+        # Both walks are keyed on the rule arm, and a project that only gates
+        # mounts has neither. The `[0]` fallbacks inside them would be an
+        # IndexError rather than a missing attribution.
+        excluded = (
+            _host_excluded_docnames(app, state, suffixes) if state.host_patterns else {}
+        )
         excluded.update(_mount_excluded_docnames(state, suffixes))
         setattr(app, _VARIANT_ATTRIBUTION_KEY, (state, excluded))
     if not excluded:
@@ -1524,11 +1788,11 @@ def _mount_excluded_docnames(
     :func:`_fold_into_mounts`), so it has nothing to attribute.
     """
     excluded: dict[str, str] = {}
-    for gated in state.gated_mounts:
-        if gated.dir is None or not gated.dir.is_dir():
+    for narrowed in state.narrowed_mounts:
+        if narrowed.dir is None or not narrowed.dir.is_dir():
             continue
-        before = _walked_relatives(gated, gated.excludes_before)
-        after = _walked_relatives(gated, gated.excludes_after)
+        before = _walked_relatives(narrowed, narrowed.excludes_before)
+        after = _walked_relatives(narrowed, narrowed.excludes_after)
         for relative in sorted(before - after):
             docname = _docname_for(relative, suffixes)
             if docname is None:
@@ -1541,21 +1805,21 @@ def _mount_excluded_docnames(
                 ),
                 state.false_rules[0][0],
             )
-            excluded[_join_mount(gated.mount_at, docname)] = label
+            excluded[_join_mount(narrowed.mount_at, docname)] = label
     return excluded
 
 
-def _walked_relatives(gated: _GatedMount, excludes: tuple[str, ...]) -> set[str]:
+def _walked_relatives(narrowed: _NarrowedMount, excludes: tuple[str, ...]) -> set[str]:
     """Mount-relative POSIX paths one walk configuration produces."""
-    assert gated.dir is not None  # noqa: S101 - guarded by the caller
+    assert narrowed.dir is not None  # noqa: S101 - guarded by the caller
     walker = _build_walker(
-        gated.dir,
-        include=gated.include,
+        narrowed.dir,
+        include=narrowed.include,
         exclude=excludes,
-        gitignore=gated.gitignore,
+        gitignore=narrowed.gitignore,
     )
     return {
-        entry.path().relative_to(gated.dir).as_posix()
+        entry.path().relative_to(narrowed.dir).as_posix()
         for entry in walker
         if entry.path().is_file()
     }
