@@ -534,6 +534,21 @@ class TestMountGateKey:
         with pytest.raises(MountConfigError, match="gated_by must be a string"):
             MountConfig(dir=tmp_path, gated_by=3)  # type: ignore[arg-type]
 
+    def test_the_unknown_key_message_advertises_the_condition_key(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A user who typed ``iff`` must find ``if`` in the list they are sent to.
+
+        The advertised list is derived from the dataclass fields, and ``if``
+        can never be one — it is a Python keyword. So the message told a user
+        to check their spelling against a list missing the very key they meant,
+        which is worse than saying nothing.
+        """
+        with caplog.at_level("WARNING"):
+            MountConfig.from_dict({"dir": tmp_path, "iff": "var.edition == 'pro'"})
+        assert "unknown mount key" in caplog.text
+        assert "'if'" in caplog.text, caplog.text
+
     def test_from_dict_does_not_mutate_its_argument(self, tmp_path: Path) -> None:
         """The caller's table is not the parser's scratch space.
 
