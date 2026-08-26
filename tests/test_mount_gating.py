@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 
 from sphinx_mounts import warnings as mount_warnings
+from sphinx_mounts.extension import _DECIDED_GATES_KEY
 from sphinx_mounts.logging import MOUNT_GATED_CODE
 from tests.test_variant_sources import _stub_conf
 
@@ -1597,3 +1598,142 @@ def test_a_live_gates_condition_does_not_shelter_an_unevaluated_twin(
     assert "riv/index" not in app.env.found_docs, "the interloper is gated"
     assert "mount_gate_unevaluable" in warning, warning
     assert "[[source.mounts]][1]" in warning, warning
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3: "do not record twice" and "do not attribute" are different
+# questions, and one exclusion was answering both
+# ---------------------------------------------------------------------------
+
+
+def test_an_undecided_gate_still_gets_its_toctree_downgrade(make_app, tmp_path):
+    """De-duplicating the RECORD must not withhold the ATTRIBUTION.
+
+    A genuinely gated TOML mount, plus a handler at 460 appending a second
+    gated mount with a different condition. The appended one is undecided, so
+    it is reported once as ``mount_gate_unevaluable`` and — correctly — not a
+    second time as an ordinary gated mount.
+
+    But its pages are still gone for exactly the reason the downgrade exists
+    for, so a toctree entry naming one of them must be downgraded rather than
+    arriving as a bare ``toc.not_readable`` with nothing connecting it to any
+    gate. One exclusion was answering both questions.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        conf_extra=(
+            "def _append(app, config):\n"
+            "    config['mounts'] = [\n"
+            "        *config['mounts'],\n"
+            f'        {{"dir": "{tmp_path / "rival"}", "mount_at": "riv", '
+            '"if": "var.edition == \'enterprise\'"},\n'
+            "    ]\n"
+            "\n"
+            "def setup(app):\n"
+            "    app.connect('config-inited', _append, priority=460)\n"
+        ),
+        host_entries=("mnt/index", "riv/index"),
+    )
+    attributed: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=attributed)
+    warning = app._warning.getvalue()
+    status = app._status.getvalue()
+    assert "riv/index" in attributed, attributed
+    assert attributed["riv/index"].startswith("[[source.mounts]][1]"), attributed
+    assert "toc.not_readable" not in warning, warning
+    # Still exactly one diagnostic for the undecided mount, and no ordinary
+    # gated record duplicating it.
+    assert warning.count("mount_gate_unevaluable") == 1, warning
+    assert status.count("[[source.mounts]][1]") == 1, status
+
+
+def test_a_duplicate_condition_costs_only_the_note(make_app, tmp_path):
+    """The residual the code claims, held to its own words.
+
+    A handler at 460 prepends a mount whose ``if`` is character-for-character
+    the one the reader already decided. The interloper consumes the multiset
+    entry, so the innocent reader-decided mount is the one flagged undecided —
+    a mislabel, and the documented cost.
+
+    What must NOT also be lost is that mount's attribution: its pages are
+    genuinely gated off, and excluding it from the attribution turned a
+    mislabel into a second, unexplained warning. With the two consumers split,
+    the residual really is only the note, which is what the docstring says.
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
+        conf_extra=(
+            "def _prepend(app, config):\n"
+            "    config['mounts'] = [\n"
+            f'        {{"dir": "{tmp_path / "rival"}", "mount_at": "riv", '
+            '"if": "var.edition == \'pro\'"},\n'
+            "        *config['mounts'],\n"
+            "    ]\n"
+            "\n"
+            "def setup(app):\n"
+            "    app.connect('config-inited', _prepend, priority=460)\n"
+        ),
+        host_entries=("mnt/index", "riv/index"),
+    )
+    attributed: dict[str, str] = {}
+    app = _build(make_app, confdir, attribution=attributed)
+    assert "mnt/index" in attributed, attributed
+    assert "riv/index" in attributed, attributed
+    assert "toc.not_readable" not in app._warning.getvalue()
+
+
+def test_the_decided_counter_is_not_drained_on_the_application(make_app, tmp_path):
+    """The parse seam must not consume the reader's record as it reads it.
+
+    ``config-inited`` fires once per application today, so draining the stored
+    Counter is latent rather than live — but the failure it invites is every
+    gated project collecting a spurious ``-W`` warning, and the trigger is
+    anything as ordinary as a second consumer of the decided set.
+    """
+    confdir, _ = make_project(tmp_path, toml=DIR_MOUNT_TOML.replace("EDITION", "basic"))
+    app = _build(make_app, confdir)
+    decided = getattr(app, _DECIDED_GATES_KEY)
+    assert decided["var.edition == 'pro'"] == 1, dict(decided)
+
+
+def test_the_both_keys_refusal_reads_as_one_sentence(make_app, tmp_path):
+    """Two halves joined mid-sentence must not each start with a capital.
+
+    The message names what the file declares and what an empty variant map
+    would cost, and both halves are generated. Joined with ``"; "`` and left
+    capitalised, the result read as two sentences beginning inside a third.
+    """
+    toml = """
+    [[source.mounts]]
+    dir = "{bundle}"
+    mount_at = "mnt"
+    if = "var.edition == 'pro'"
+
+    [[source.variant_sources]]
+    if = "var.edition == 'pro'"
+    files = ["hostgated.rst"]
+
+    [needs.variant_data]
+    edition = "basic"
+    """
+    confdir, _ = make_project(
+        tmp_path,
+        toml=toml,
+        host_files={"hostgated.rst": "Gated\n=====\n"},
+    )
+    _stub_conf(
+        confdir,
+        "needs_stub_both_keys_sentence",
+        inline="{}",
+        file_ref="None",
+        from_toml='"other.toml"',
+    )
+    with pytest.raises(Exception) as excinfo:
+        _build(make_app, confdir)
+    message = str(excinfo.value)
+    assert "; Every" not in message, message
+    assert "every rule would report" in message, message
+    assert "and every mount `if` would report" in message, message
+    assert "both `[[source.variant_sources]]` and" in message, message
