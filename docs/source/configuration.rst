@@ -1477,15 +1477,19 @@ on a mount entry removes a **whole bundle**.
 
    [[source.mounts]]
    dir = "../bundles/reference-pro"
-   mount_at = "reference"
+   mount_at = "reference/pro"
    attach_to = "index"
    if = "var.edition == 'pro'"        # gated off for edition = "basic"
 
    [[source.mounts]]
    dir = "../bundles/reference-basic"
-   mount_at = "reference"
+   mount_at = "reference/basic"
    attach_to = "index"
    if = "var.edition == 'basic'"      # this one is built
+
+Note the two **distinct** ``mount_at`` prefixes. Pointing both bundles at one
+prefix works and is a natural thing to reach for, but it costs the gated
+bundle's attribution — see :ref:`mount-gating-contest` below before writing it.
 
 The rule, in one sentence:
 
@@ -1577,7 +1581,9 @@ nothing in the host happens to reference them there is no other signal at all.
 
 It is an **INFO** record rather than a warning, because gating is what you
 asked for: ``sphinx-build -W`` passes on a correctly gated build, in either
-variant, serially and under ``-j``.
+variant, serially and under ``-j`` — unless a gated mount's docname is
+contested, which is the one exception and has its own section
+(:ref:`mount-gating-contest`).
 
 Toctrees, and the ``-W`` posture
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1588,6 +1594,50 @@ mount and its condition, downgraded to INFO, and carries
 :ref:`rule-excluded reference <variant-sources>` is. It is a downgrade, never
 a suppression, and it is exact: a reference to a document no rule and no gate
 explains still warns and still fails ``-W``.
+
+The exception is a **contested** gated mount, below.
+
+.. _mount-gating-contest:
+
+When two mounts share a ``mount_at``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pointing a pro bundle and a basic bundle at the *same* ``mount_at``, with
+mutually exclusive conditions, is a natural thing to write. It works — exactly
+one of them is built — but it has a cost worth knowing before you choose it.
+
+Both bundles almost certainly contain an ``index``, so both would supply the
+same docname. The gated bundle therefore hits the ordinary
+:ref:`docname collision <warnings-and-errors>` rule, which skips a **whole**
+mount rather than one file, and its attribution comes out **empty** — not just
+for the contested page but for its uncontested siblings too. A ``toctree``
+entry naming one of those siblings is then an ordinary
+``toc.not_readable`` warning, and ``sphinx-build -W`` fails in that variant.
+
+The build says so. The ``mounts.mount_gated`` record names the contested
+docname:
+
+.. code-block:: text
+
+   sphinx-mounts: [[source.mounts]][0] (if = "var.edition == 'pro'") is false
+   for this variant, so the whole mount is gated off — … Attribution
+   suppressed: docname(s) contested by the live build (first:
+   'reference/index'), so toctree references into this bundle are reported as
+   ordinary missing-document warnings rather than downgraded.
+   [mounts.mount_gated]
+
+**Give each bundle its own** ``mount_at`` **and the cost disappears**: nothing
+is contested, every gated page is attributed, and ``-W`` passes in both
+variants. If you need one shared prefix, keep the host's shared index to pages
+that exist in every variant.
+
+Why not just drop the contested docname and keep the siblings? Because whether
+the gated mount would have supplied those siblings in the variant where it is
+live depends on which mounts are live *there* — and if the contest is
+permanent (the host owns the docname, say), the mount is skipped in every
+variant and those siblings exist in none of them. Attributing a page that no
+variant builds is a phantom, and a phantom silences a genuine warning. The
+conservative direction is taken on purpose.
 
 .. warning::
 
@@ -1611,11 +1661,10 @@ Limitations
   ``index`` leaves Sphinx to abort with a message blaming the source
   directory. The same limitation applies to a rule-narrowed mount.
 - **A gated mount whose docname the host or a live mount also provides
-  attributes nothing**, including its other pages. The contested docname
-  triggers the usual whole-mount skip, and a toctree reference into such a
-  bundle warns rather than being downgraded. That is the conservative
-  direction on purpose: attributing a page that some variant does build would
-  silence a genuine warning about it.
+  attributes nothing**, including its other pages, so a toctree reference into
+  such a bundle warns rather than being downgraded and ``-W`` fails in that
+  variant. See :ref:`mount-gating-contest` for the whole story and the
+  one-line fix.
 
 .. warning::
 
@@ -1719,8 +1768,9 @@ suppressed and appear only in an ``Extension error`` message:
 ``mounts.variant_glob_dialect`` (a rule glob spelling no reader can share),
 ``mounts.variant_layout`` (rules declared where no glob can be anchored),
 ``mounts.variant_root_doc`` (a false rule would remove the root document)
-and ``mounts.variant_data_unreadable`` (no variant map, and no Sphinx-Needs
-installed to report it). Two more mark an **INFO** record rather than a
+and ``mounts.variant_data_unreadable`` (there is no usable variant map: either
+nothing else is installed to compute one, or Sphinx-Needs is installed and was
+never pointed at this file, so it resolved an empty one). Two more mark an **INFO** record rather than a
 warning: ``mounts.variant_excluded_reference``, the :ref:`downgraded toctree
 reference <variant-sources>`, and ``mounts.mount_gated``, the record of a
 :ref:`gated-off mount <mount-gating>`.

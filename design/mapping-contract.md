@@ -577,6 +577,7 @@ implementation rather than one already in the field.
 | A `variant_sources` glob with `?` beside a separator (§12.4) | Refused; the configuration does not resolve. | Accepted — globset compiles it, and ubCode has no second dialect to translate it into. | It is the one spelling with no faithful gitignore form: `?` may cross a path separator in one engine and never does in another. Refusing keeps "one rule string, one document set"; documenting it as a divergence would put the hazard back where the whole grammar narrowing removed it from. No corpus row and no shipped fixture uses it. |
 | A rule condition outside the grammar (§12.5) | Hard `VariantRuleError`, listing every offending rule at once; the build stops. | Reported (`config.variant_source_invalid_condition`) and the rule is **retained as permanently false**, so its files are excluded. | Both are fail-closed; they differ in severity, and each follows its own host's posture — ubCode has no config-time equivalent of `-W`, while this reader can stop the build and a condition it cannot interpret is a configuration mistake the author fixes once. |
 | A mount `if` outside the grammar (§13.3) | Hard `VariantRuleError`, in the **same** error that lists any offending rule; the build stops. | Reported (`config.mount_invalid_condition`) and the mount is gated **off**. | Identical to the row above, for the identical reason, and deliberately so: one grammar must not mean two things in one file. Both are fail-closed and both keep the bundle out; only the severity differs. |
+| Diagnostics about a gated-off mount's own keys (§13.2) | **Suppressed.** The gated mount's discovery pipeline still runs, so its whole-mount skips still apply, but every report it would make — an absent root, an unregistered suffix, a docname that is only a suffix, a dead `include`/`exclude`, an occupied `strict_mount_at`, a collision between two of its own files — goes to the debug log instead. | **Resolve-time reports still fire.** `config.mount_dead_option` and `config.mount_invalid` are emitted where the entry is resolved, before any gating decision, so a gated mount's key mistakes are still reported. Its discovery-time twin `config.mount_missing` is not, because a gated mount is never planned. | Each reader suppresses what its own architecture makes variant-dependent. These are warnings here, and `-W` is a real thing: reporting an absent bundle root would fail a build whose author gated the bundle precisely because CI has not checked it out. ubCode has no `-W`, and its resolve tier runs before variants exist at all, so a key typo there is genuinely variant-independent and worth reporting once. The consequence to know is that a CI building only the gated variant learns less about the bundle here than it would there. |
 | A gated-off mount that provides `root_doc` (§13.7) | **Not guarded.** The mount is gated, the root document goes with it, and Sphinx aborts with a message blaming the source directory. | Refused at configuration time, mirroring its refusal of a rule that would exclude `root_doc`. | This reader's root-document guard runs at configuration time and cannot know what a mount will produce (§12.8 records the same limit for a rule-narrowed mount). ubCode resolves its document set before it decides, so the guard is available there and is taken. |
 | The root-document guard (§12.4) | **Stronger on suffixes, WEAKER on mounts.** The candidate suffixes are the project's registered ones — the `source_suffix` confval UNION the extension registry — so the candidate paths are the real ones, including an extension-registered `.md`. But a root document provided by a MOUNT is not covered: the guard runs at configuration time and cannot know what a mount will produce (§12.8 states the same limitation). | Best-effort on suffixes — they are inferred from the project's discovery `include` globs, so a project whose only include glob is unreadable *and* whose root document has an exotic suffix keeps the pre-guard behaviour — and it DOES cover mount-resident root documents. | Neither guard is a superset of the other, and an earlier version of this row claimed one was. Each reader is stronger on the axis its own architecture makes cheap: registered suffixes here, a resolved document set there. |
 | Non-identity source-root layouts (§12.7) | Refused (`mounts.variant_layout`) when rules are declared and the source root is not `srcdir`. | Supported: rule globs are re-anchored per source root, and ubCode has no single `srcdir` to disagree with. | Sphinx has exactly one source directory, and a prefix-shifted rewrite has no correct form for a basename-matching rule. So some layouts that work in ubCode need one extra line (`[source] dir`) here. The alternative — gating only the root that happens to coincide — is the failure the key exists to prevent. |
@@ -1084,11 +1085,19 @@ mount written before this key existed says.
 > own.
 
 The bundle is out of the build, not merely unwired. Its `attach_to` is a no-op,
-its `entry_doc` is not a docname, and every problem a live mount could have had
-— an absent root, a contested docname, an occupied `mount_at` — is hypothetical
-and goes unreported. Those are all *warnings*, so reporting them would fail
-`sphinx-build -W` on a project whose only sin is gating a bundle its CI has not
-checked out.
+its `entry_doc` is not a docname, and every problem its own discovery pipeline
+would report — an absent root, a contested docname, an occupied `mount_at`, an
+unregistered suffix, a dead `include`/`exclude` — goes to the debug log instead.
+Those are all *warnings*, so reporting them would fail `sphinx-build -W` on a
+project whose only sin is gating a bundle its CI has not checked out.
+
+Two of those are genuinely hypothetical for a gated mount (an absent root, an
+occupied `mount_at`); the rest are properties of the bundle that hold in every
+variant, and suppressing them is a stated trade-off rather than an obvious win —
+a CI that only builds the gated variant does not learn the bundle is broken.
+Every one of them is still reported in a variant that builds the bundle. §11
+records where ubCode differs, which is on the checks its architecture evaluates
+before variants exist.
 
 **Both mount modes are gated, uniformly.** A `files` mount and a `dir` mount are
 one line apart here and in ubCode, because dropping a whole bundle touches
@@ -1120,17 +1129,31 @@ The checks of §12.2 apply, with two scoping rules:
 | the condition is **false** | mount gated off; `mounts.mount_gated` (INFO) |
 | the condition is **outside the grammar**, or is not a string | the whole configuration is refused, listing every offender from both keys |
 | the condition cannot be **evaluated** (unknown `var.*`, type mismatch) | mount gated off; `mounts.variant_rule_unevaluable` |
-| the condition is declared where this reader never evaluates one | mount gated off; `mounts.mount_gate_unevaluable` |
+| the condition is declared where **nothing evaluates** it | mount gated off; `mounts.mount_gate_unevaluable` |
 
 Every row ends with the bundle out of the build. Fail-closed is not a preference
 here: a reader that published a bundle whose gate it could not evaluate would be
 doing the one thing this key exists to prevent.
 
-The last row is this reader's own: `sources_from_toml = None` switches off
-everything read from TOML, and a `ubproject.toml` that does not exist supplies
-nothing. In both, the mounts came from `conf.py`, and the condition on one of
-them reaches no evaluator. A second implementation with no `conf.py` route has
-no such row.
+The last row covers four routes, and the invariant behind it is the one to
+reproduce: **every route that gates is a route that reports.** A gating key
+whose verdict can be reached without a diagnostic is a bundle that vanishes in
+silence, which §13.4 exists to prevent.
+
+Three of the four are this reader's stand-downs: `sources_from_toml = None`
+switches off everything read from TOML, a `ubproject.toml` that does not exist
+supplies nothing, and a variant map that cannot be read leaves nothing to
+evaluate against. In the first two the mounts came from `conf.py`. The fourth is
+structural rather than a stand-down: a mount can reach the parser carrying a
+condition the reader never saw — here, through a `config-inited` handler that
+writes the mounts array after the reader has run, or a `conf.py` that sets the
+internal gate field directly. Both gate the bundle off, because fail-closed is
+the only defensible reading of a condition nothing evaluated, and both are
+reported at the parse seam rather than at the reader.
+
+Each route carries its own **remedy**, not only its own reason; the three
+stand-downs share none. A second implementation with no `conf.py` route and one
+configuration pass has fewer routes, but it owes the invariant, not the list.
 
 ### 13.4 The record, and why it is not optional
 
@@ -1147,7 +1170,16 @@ re-reading `ubproject.toml`.
 
 INFO rather than a warning, for the reason §12.6 gives about the toctree
 downgrade: gating is what the author asked for, and `-W` has to pass on a
-correctly configured variant build.
+correctly configured variant build — with the one exception §13.7's last bullet
+records.
+
+**When that exception fires the record says so.** A gated mount whose
+attribution was emptied by a contest names the contested docname in this
+record, because a whole-mount skip leaves references to the bundle's *other*
+pages as ordinary missing-document warnings and nothing else in the build log
+connects them to the gate. It is therefore emitted after discovery rather than
+at configuration time: the gate is a configuration fact and the contest is a
+discovery fact, and the record has to carry both.
 
 ### 13.5 Toctree references into a gated bundle
 
@@ -1194,13 +1226,21 @@ byte-identical across a flip and needs an invalidation story of its own.
   `if` is a Python keyword, so no dataclass field can be named for it. A
   `conf.py` mount written as a plain mapping is read like any TOML table. TOML
   is the primary config target, so this is a documented limitation of one route
-  rather than of the key.
+  rather than of the key. Setting the internal gate field on such an instance
+  gates the mount off — fail-closed — and is reported at the parse seam like
+  any other condition nothing evaluated (§13.3).
 - **A gated mount whose docname is claimed by the host or by a live mount
   attributes nothing at all**, including its uncontested pages. The contested
   docname triggers the same whole-mount skip §7 applies everywhere, and the
   reduction reaches the siblings with it. Whether the mount would have supplied
   those pages in the variant where it is live depends on which mounts are live
   *there*, which this build cannot know — so the conservative reading is taken.
-  The cost is a genuine warning on a toctree reference into a contested gated
-  bundle; the alternative cost is a phantom, and a phantom silences a real
-  warning.
+  The alternative cost is a phantom, and a phantom silences a real warning.
+
+  The consequence is user-visible and belongs in any statement of the `-W`
+  posture: a toctree entry naming one of those uncontested siblings is an
+  ordinary `toc.not_readable` warning, so **`sphinx-build -W` fails in the
+  gated variant**. Two mounts sharing one `mount_at` with mutually exclusive
+  conditions is the shape that reaches it, and it is a natural thing to write;
+  distinct `mount_at` prefixes remove the cost entirely. §13.4's record names
+  the contested docname so the warning is traceable to the gate.

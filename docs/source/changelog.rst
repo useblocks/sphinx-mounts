@@ -128,6 +128,15 @@ Unreleased
   warning because gating is what you asked for — ``sphinx-build -W`` passes on a
   correctly gated build, in both variants, serially and under ``-j``.
 
+  **One exception**, and it is the shape you are most likely to reach for:
+  pointing two bundles at the *same* ``mount_at`` with mutually exclusive
+  conditions. Both would supply the same ``index``, so the gated one hits the
+  ordinary docname-collision rule, its whole attribution is dropped, and a
+  toctree entry naming one of its other pages warns and fails ``-W``. The
+  ``mounts.mount_gated`` record names the contested docname when this happens.
+  Giving each bundle its own ``mount_at`` removes the cost entirely — see
+  :ref:`mount-gating-contest`.
+
   A ``toctree`` entry naming a page in a gated bundle is reworded to name the
   mount and its condition and downgraded to INFO, exactly as a rule-excluded
   reference already is.
@@ -138,12 +147,21 @@ Unreleased
 
   .. warning::
 
-     **This key requires a matching ubCode**, and vice versa. An older reader
-     of either tool warns about the unknown key and **builds the bundle
-     anyway** — which under ``sphinx-build -W`` is a failed build, and without
-     it is a published bundle you gated. The two tools ship the key in
-     coordinated releases for that reason; see :ref:`mount-gating` for the
-     minimum versions.
+     **This key requires a matching ubCode**, and vice versa. Neither tool can
+     detect the other's version while it builds, so these release notes are the
+     only mechanism there is.
+
+     A reader too old for the key reports it as an unknown key and **builds the
+     bundle anyway** — which under ``sphinx-build -W`` is a failed build, and
+     without it is a published bundle you gated. The two tools ship the key in
+     coordinated releases for that reason.
+
+     One older combination is a **hard stop** rather than a degradation: the
+     deprecated top-level ``[[mounts]]`` spelling carrying ``if``, read by
+     sphinx-mounts 0.1.4, aborts the build with ``MountConfigError: Unknown
+     mount keys: ['if']`` and exit code 2. That is fail-closed — nothing is
+     published — but it is not survivable, so migrate the table header to
+     ``[[source.mounts]]`` before adopting the key.
 
 - New ``sources_from_toml`` config value, replacing ``mounts_from_toml``
   (which still works). Same default, same semantics, and the same file. The
