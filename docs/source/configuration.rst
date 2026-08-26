@@ -1553,10 +1553,14 @@ Every failure keeps the bundle out
    * - the condition **cannot be evaluated** — an unknown ``var.*`` key is
        the usual cause
      - the mount is gated off; ``mounts.variant_rule_unevaluable``
-   * - the condition is declared where this reader never evaluates one —
-       ``sources_from_toml = None``, or no ``ubproject.toml``, with the
-       mount declared in ``conf.py``
-     - the mount is gated off; ``mounts.mount_gate_unevaluable``
+   * - the condition is declared where **nothing evaluates** it — any of
+       four routes: ``sources_from_toml = None``; no ``ubproject.toml``;
+       variant data that could not be read; or a mount that reached the
+       parser without passing this reader at all, through a
+       ``config-inited`` handler between priorities 450 and 500 or a
+       ``MountConfig`` built with the internal gate field set
+     - the mount is gated off; ``mounts.mount_gate_unevaluable``, with a
+       remedy naming that route
 
 A gating key that published a bundle whose condition it could not evaluate
 would be doing the one thing the key exists to prevent, so every row ends with
@@ -1665,6 +1669,13 @@ Limitations
   such a bundle warns rather than being downgraded and ``-W`` fails in that
   variant. See :ref:`mount-gating-contest` for the whole story and the
   one-line fix.
+- **The same is true of every other whole-mount skip**: an occupied
+  ``strict_mount_at``, a bundle root that is not on disk, a listed file with no
+  registered suffix. The absent-root one is worth knowing about, because gating
+  a bundle your CI has not checked out is a perfectly normal reason to gate —
+  its pages are absent, the absence itself is not reported, and a reference to
+  them warns genuinely. The ``mounts.mount_gated`` record names the skip in
+  every case, so the warning is always traceable back to the gate.
 
 .. warning::
 
@@ -1737,10 +1748,11 @@ at once), and escalated to a failed build:
      - ``strict_mount_at`` is set and the host already has a directory
        at the mount point; the whole mount is skipped
    * - ``mounts.mount_gate_unevaluable``
-     - a mount declares :ref:`if <mount-gating>` in a project where this
-       reader never evaluates one — ``sources_from_toml = None``, or no
-       ``ubproject.toml``, with the mount declared in ``conf.py``; the
-       whole mount is gated **off**
+     - a mount declares :ref:`if <mount-gating>` and **nothing evaluates
+       it** — ``sources_from_toml = None``, no ``ubproject.toml``,
+       unreadable variant data, or a mount that reached the parser
+       without passing this extension's reader; the whole mount is gated
+       **off**
    * - ``mounts.path_escape``
      - a mounted doc references a file outside its bundle root (the default
        ``path_check = "warn"``; ``"error"`` aborts instead of warning)

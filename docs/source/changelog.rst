@@ -128,14 +128,18 @@ Unreleased
   warning because gating is what you asked for — ``sphinx-build -W`` passes on a
   correctly gated build, in both variants, serially and under ``-j``.
 
-  **One exception**, and it is the shape you are most likely to reach for:
-  pointing two bundles at the *same* ``mount_at`` with mutually exclusive
-  conditions. Both would supply the same ``index``, so the gated one hits the
-  ordinary docname-collision rule, its whole attribution is dropped, and a
-  toctree entry naming one of its other pages warns and fails ``-W``. The
-  ``mounts.mount_gated`` record names the contested docname when this happens.
-  Giving each bundle its own ``mount_at`` removes the cost entirely — see
-  :ref:`mount-gating-contest`.
+  **The exception is a gated mount whose discovery takes a whole-mount skip**,
+  because then there is nothing to downgrade. The shape you are most likely to
+  reach for is pointing two bundles at the *same* ``mount_at`` with mutually
+  exclusive conditions: both would supply the same ``index``, so the gated one
+  hits the ordinary docname-collision rule, its whole attribution is dropped,
+  and a toctree entry naming one of its other pages warns and fails ``-W``.
+  Giving each bundle its own ``mount_at`` removes that cost entirely — see
+  :ref:`mount-gating-contest`. An occupied ``strict_mount_at`` and a bundle
+  root that is not on disk do the same thing. In every case the
+  ``mounts.mount_gated`` record says which skip it was, so the warning is
+  traceable back to the gate rather than arriving as a bare
+  ``toc.not_readable``.
 
   A ``toctree`` entry naming a page in a gated bundle is reworded to name the
   mount and its condition and downgraded to INFO, exactly as a rule-excluded
