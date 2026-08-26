@@ -1965,7 +1965,21 @@ def setup(app: Sphinx) -> dict[str, Any]:
         # version bump and not just a config change: the config *values* do
         # converge on their own (both are `rebuild="env"`), but only for a
         # cache that already knows about the reader.
-        "env_version": 2,
+        #
+        # 2 -> 3: `if` on a `[[source.mounts]]` entry, for the same reason and
+        # two more that are specific to it. The reader changes which docnames
+        # the project produces — a whole bundle at a time — so the first
+        # sentence above transfers verbatim. Beyond that:
+        #
+        # * `_MountAwareProject` gained a field (`_gated_entry_docnames`), and
+        #   the pickled shape of that class is named above as a bump trigger;
+        # * the wiring signature is keyed on a mount's INDEX in the `mounts`
+        #   config list, which is safe only while that confval really changes
+        #   on a gating flip. It does — the gate lives in the value, as a key
+        #   present on a gated table and stripped from a live one — but the
+        #   coupling is one an environment written by a version that did not
+        #   read the key cannot know about.
+        "env_version": 3,
         "parallel_read_safe": True,
         "parallel_write_safe": True,
     }

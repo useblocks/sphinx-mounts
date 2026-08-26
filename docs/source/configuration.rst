@@ -326,6 +326,14 @@ and never neither.
      - How to react when a directive inside a mounted doc references a
        file outside the bundle root. One of ``"warn"`` (default),
        ``"error"``, or ``"off"``. See :ref:`path-confinement` below.
+   * - ``if``
+     - no
+     - A condition over the variant map. When it is **false** for the
+       current build variant the **whole mount** is gated off: it
+       contributes no documents and wires nothing. Same grammar as a
+       :ref:`variant rule <variant-sources>`'s ``if``, evaluated by the
+       same machinery. Works in both mount modes. See
+       :ref:`mount-gating` below.
 
 .. _root-mount:
 
@@ -1452,6 +1460,172 @@ true condition is a valid "this whole tree, this variant only". A refused
 glob spelling is variant-*independent* — it is unusable in every variant,
 so it is refused before any condition is evaluated, and you fix it once.
 
+.. _mount-gating:
+
+Gating a whole mount: ``if`` on a mount entry
+---------------------------------------------
+
+The second variant-gating key, and the blunter of the two. A
+:ref:`variant rule <variant-sources>` narrows a *file set* by glob; an ``if``
+on a mount entry removes a **whole bundle**.
+
+.. code-block:: toml
+
+   # ubproject.toml
+   [needs.variant_data]
+   edition = "basic"
+
+   [[source.mounts]]
+   dir = "../bundles/reference-pro"
+   mount_at = "reference"
+   attach_to = "index"
+   if = "var.edition == 'pro'"        # gated off for edition = "basic"
+
+   [[source.mounts]]
+   dir = "../bundles/reference-basic"
+   mount_at = "reference"
+   attach_to = "index"
+   if = "var.edition == 'basic'"      # this one is built
+
+The rule, in one sentence:
+
+   A mount whose ``if`` is **false** for the current variant contributes
+   nothing — no documents, no toctree wiring, and no diagnostics of its own.
+
+The bundle is out of the build, not merely unwired. Its ``attach_to`` is a
+no-op, its pages have no docnames, and every problem a live mount could have
+had — an absent bundle root, a contested docname, an occupied ``mount_at`` —
+is hypothetical and goes unreported. Those are all warnings, so reporting
+them would fail ``sphinx-build -W`` on a project whose only sin is gating a
+bundle its CI has not checked out.
+
+The condition is the **same grammar** as a variant rule's ``if``, read by the
+same validator and evaluated over the same
+:ref:`variant map <variant-sources>` — everything that page says about the
+grammar, its departures from Python, and where the map comes from applies
+here unchanged. A condition outside the grammar is a configuration error, and
+the message lists every offender from **both** keys at once.
+
+Both mount modes are gated
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``if`` gates a ``files`` mount exactly as it gates a ``dir`` one.
+
+.. note::
+
+   That is the opposite of what :ref:`variant rules <variant-sources>` do, and
+   the difference is worth reading twice. **No rule narrows a file-list
+   mount**, in either tool — a ``files`` mount's entries are an explicit
+   request for named files and bypass pattern matching entirely — and this key
+   does not change that. What it adds is the ability to drop such a mount
+   *whole*, which needs no pattern matching at all.
+
+A project with no rules can still gate mounts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Nothing else has to be declared: a ``[[source.mounts]]`` array and a variant
+map are enough.
+
+The layout restriction that applies to :ref:`rule globs <variant-sources>` —
+``ubproject.toml`` beside the source directory, or ``[source] dir`` naming it —
+does **not** apply to a mount ``if``, because there is no glob to anchor. A
+project whose ``conf.py`` lives in ``docs/`` and whose sources live in
+``docs/source/`` can gate mounts without declaring anything extra.
+
+Every failure keeps the bundle out
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :widths: 45 55
+   :header-rows: 1
+
+   * - What happened
+     - What you get
+   * - the condition is **false**
+     - the mount is gated off; ``mounts.mount_gated`` (INFO)
+   * - the condition is **outside the grammar**, or is not a string
+     - the whole configuration is refused, listing every offending rule
+       *and* mount condition at once
+   * - the condition **cannot be evaluated** — an unknown ``var.*`` key is
+       the usual cause
+     - the mount is gated off; ``mounts.variant_rule_unevaluable``
+   * - the condition is declared where this reader never evaluates one —
+       ``sources_from_toml = None``, or no ``ubproject.toml``, with the
+       mount declared in ``conf.py``
+     - the mount is gated off; ``mounts.mount_gate_unevaluable``
+
+A gating key that published a bundle whose condition it could not evaluate
+would be doing the one thing the key exists to prevent, so every row ends with
+the bundle out.
+
+A gated mount is always reported
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``mounts.mount_gated`` fires once per gated-off mount **whether or not
+anything in the project references the bundle**:
+
+.. code-block:: text
+
+   sphinx-mounts: [[source.mounts]][0] (if = "var.edition == 'pro'") is false
+   for this variant, so the whole mount is gated off — it contributes no
+   documents, wires nothing into a host toctree, and toctree references to its
+   pages are downgraded. [mounts.mount_gated]
+
+A variant rule names a glob you wrote beside the files it removed. A mount
+``if`` can remove hundreds of pages that live in another repository, and if
+nothing in the host happens to reference them there is no other signal at all.
+
+It is an **INFO** record rather than a warning, because gating is what you
+asked for: ``sphinx-build -W`` passes on a correctly gated build, in either
+variant, serially and under ``-j``.
+
+Toctrees, and the ``-W`` posture
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A ``toctree`` entry naming a page in a gated bundle is reworded to name the
+mount and its condition, downgraded to INFO, and carries
+``[mounts.variant_excluded_reference]`` — exactly as a
+:ref:`rule-excluded reference <variant-sources>` is. It is a downgrade, never
+a suppression, and it is exact: a reference to a document no rule and no gate
+explains still warns and still fails ``-W``.
+
+.. warning::
+
+   **The stale-output caveat of** :ref:`variant-sources` **applies here, and
+   matters more.** Sphinx does not delete output for documents that have left
+   the build, so flipping a gate in a warm output directory leaves a whole
+   bundle's pages on disk — live, URL-reachable, and absent only from
+   navigation, ``objects.inv`` and search. Build each variant into its own
+   doctree and output directory, or use ``-E`` with a clean ``outdir``.
+
+Limitations
+~~~~~~~~~~~
+
+- **A ``conf.py``-declared** ``MountConfig`` **instance cannot carry**
+  ``if``. It is a Python keyword, so no dataclass field can be named for it.
+  A ``conf.py`` mount written as a plain ``dict`` is read like any TOML table,
+  and TOML is the primary config target.
+- **A gated-off mount that provides** ``root_doc`` **is not guarded.** The
+  root-document refusal runs at configuration time and cannot know what a
+  mount will produce, so gating a root mount that supplies the project's
+  ``index`` leaves Sphinx to abort with a message blaming the source
+  directory. The same limitation applies to a rule-narrowed mount.
+- **A gated mount whose docname the host or a live mount also provides
+  attributes nothing**, including its other pages. The contested docname
+  triggers the usual whole-mount skip, and a toctree reference into such a
+  bundle warns rather than being downgraded. That is the conservative
+  direction on purpose: attributing a page that some variant does build would
+  silence a genuine warning about it.
+
+.. warning::
+
+   **This key requires a matching** `ubCode`_, **and vice versa.** Neither tool
+   can detect the other's version at build time, so the release notes are the
+   mechanism. A reader too old for the key reports it as an unknown key and
+   **builds the bundle anyway** — under ``sphinx-build -W`` that is a failed
+   build, and without it a published bundle you gated. The two tools ship the
+   key in coordinated releases for exactly that reason.
+
 .. _warnings-and-errors:
 
 Warnings and errors
@@ -1513,6 +1687,11 @@ at once), and escalated to a failed build:
    * - ``mounts.mount_at_occupied``
      - ``strict_mount_at`` is set and the host already has a directory
        at the mount point; the whole mount is skipped
+   * - ``mounts.mount_gate_unevaluable``
+     - a mount declares :ref:`if <mount-gating>` in a project where this
+       reader never evaluates one — ``sources_from_toml = None``, or no
+       ``ubproject.toml``, with the mount declared in ``conf.py``; the
+       whole mount is gated **off**
    * - ``mounts.path_escape``
      - a mounted doc references a file outside its bundle root (the default
        ``path_check = "warn"``; ``"error"`` aborts instead of warning)
@@ -1531,9 +1710,9 @@ at once), and escalated to a failed build:
      - a variant rule lists no files, so it gates nothing; the rule is
        dropped and the document set is unchanged
    * - ``mounts.variant_rule_unevaluable``
-     - a variant rule's condition could not be evaluated against the
-       variant data (an unknown ``var.*`` key is the usual cause); the
-       rule's files are **excluded**
+     - a variant rule's or a mount's condition could not be evaluated
+       against the variant data (an unknown ``var.*`` key is the usual
+       cause); the rule's files, or the whole mount, are **excluded**
 
 Four codes name a *hard* failure rather than a warning, so they cannot be
 suppressed and appear only in an ``Extension error`` message:
@@ -1541,9 +1720,10 @@ suppressed and appear only in an ``Extension error`` message:
 ``mounts.variant_layout`` (rules declared where no glob can be anchored),
 ``mounts.variant_root_doc`` (a false rule would remove the root document)
 and ``mounts.variant_data_unreadable`` (no variant map, and no Sphinx-Needs
-installed to report it). One more,
-``mounts.variant_excluded_reference``, marks an **INFO** record: the
-:ref:`downgraded toctree reference <variant-sources>`.
+installed to report it). Two more mark an **INFO** record rather than a
+warning: ``mounts.variant_excluded_reference``, the :ref:`downgraded toctree
+reference <variant-sources>`, and ``mounts.mount_gated``, the record of a
+:ref:`gated-off mount <mount-gating>`.
 
 .. _suppressing-mount-warnings:
 
