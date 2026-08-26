@@ -1470,20 +1470,25 @@ def test_a_degenerate_condition_is_reported_exactly_once(make_app, tmp_path, wri
 def test_a_mount_replaced_inside_the_window_is_still_reported(make_app, tmp_path):
     """The catch the pairing exists for, kept across the redesign.
 
-    The reader evaluated one condition; a handler at 470 swaps in a mount
-    carrying a DIFFERENT one at the same index. Nothing evaluated the new
-    condition, so the bundle must be gated off and said so — a mechanism that
-    matched on position alone would see "index 0, already decided" and stay
-    quiet.
+    Constructed so that position alone cannot answer it. The reader gates the
+    TOML mount OFF, so its condition really is in the decided multiset and
+    there really is one decided gate at index 0. A handler at 470 then swaps in
+    a mount carrying a DIFFERENT condition at that same index.
+
+    Nothing evaluated the new condition, so the bundle must be gated off and
+    said so. A mechanism that matched on position — "index 0, and one gate was
+    decided" — would consume the entry and stay quiet, which is why the
+    matching is on the condition string.
     """
+    swapped = "var.edition == 'enterprise'"
     confdir, _ = make_project(
         tmp_path,
-        toml=DIR_MOUNT_TOML.replace("EDITION", "pro"),
+        toml=DIR_MOUNT_TOML.replace("EDITION", "basic"),
         conf_extra=(
             "def _swap(app, config):\n"
             "    config['mounts'] = [\n"
             f'        {{"dir": "{bundle_path(tmp_path)}", "mount_at": "mnt", '
-            '"if": "var.edition == \'basic\'"}\n'
+            f'"if": "{swapped}"}}\n'
             "    ]\n"
             "\n"
             "def setup(app):\n"
@@ -1494,6 +1499,7 @@ def test_a_mount_replaced_inside_the_window_is_still_reported(make_app, tmp_path
     warning = app._warning.getvalue()
     assert "mnt/index" not in app.env.found_docs, "fail closed"
     assert "mount_gate_unevaluable" in warning, warning
+    assert swapped in warning, warning
 
 
 # ---------------------------------------------------------------------------
