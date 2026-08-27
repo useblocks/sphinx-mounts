@@ -74,7 +74,7 @@ Changelog
   Whitespace stays free where that grammar allows it (``var.count>=2``,
   ``[ 'a' , 'b' ]``). Both tables are published in
   ``design/mapping-contract.md`` §12.5 and pinned by a 209-row parity suite,
-  alongside the vendored 46-row conformance corpus the test suite still runs in
+  alongside the vendored 103-row conformance corpus the test suite still runs in
   full.
 
   Six categories of glob spelling refuse the whole configuration rather than
