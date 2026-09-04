@@ -13,4 +13,4 @@
 # `tests/test_sphinx_version.py` asserts the outcome rather than trusting this
 # file, so a future silent upgrade is a red test rather than an invisible one.
 sphinx<8
-myst-parser<5
+myst-parser<6
