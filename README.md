@@ -1,5 +1,13 @@
 # Sphinx Mounts
 
+> [!IMPORTANT]
+> **This repository has moved.** Sphinx Mounts is now developed in
+> [useblocks/sphinx-needs](https://github.com/useblocks/sphinx-needs), under
+> [`packages/sphinx-mounts`](https://github.com/useblocks/sphinx-needs/tree/master/packages/sphinx-mounts),
+> with its full history. Please open issues and pull requests there. The package keeps
+> its name on PyPI, the documentation stays at https://sphinx-mounts.useblocks.com, and this repository
+> is archived (read-only).
+
 Mount external source trees into a Sphinx build without copying or
 symlinking. Sources stay where they live — for example, a Bazel `bazel-bin/`
 output tree, a sibling repository, or a generated cache directory — and are
