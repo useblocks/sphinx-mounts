@@ -122,7 +122,7 @@ jobs:
       # The Bazel doc-build targets shell out to ``uv run`` from PATH
       # (see tests/example/build_docs*.sh); make uv available job-wide.
       - uses: astral-sh/setup-uv@v7
-      - uses: bazel-contrib/setup-bazel@0.19.0
+      - uses: bazel-contrib/setup-bazel@0.19.1
         with:
           bazelisk-cache: true
           repository-cache: true
